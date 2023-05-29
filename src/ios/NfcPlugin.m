@@ -5,6 +5,7 @@
 //  (c) 2107-2020 Don Coleman
 
 #import "NfcPlugin.h"
+#import <CoreNFC/CoreNFC.h>
 
 @interface NfcPlugin() {
     NSString* sessionCallbackId;
