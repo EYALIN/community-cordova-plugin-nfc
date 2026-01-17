@@ -1,18 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Community Cordova NFC Plugin
+  Licensed under MIT License
+-->
 <plugin
-    xmlns="http://www.phonegap.com/ns/plugins/1.0"
+    xmlns="http://apache.org/cordova/ns/plugins/1.0"
     xmlns:android="http://schemas.android.com/apk/res/android"
     id="community-cordova-plugin-nfc"
-    version="1.4.0">
+    version="1.5.0">
 
     <name>NFC</name>
-
-    <description>Near Field Communication (NFC) Plugin. Read and write NDEF messages to NFC tags and share NDEF messages with peers.</description>
-
+    <description>Community Cordova NFC Plugin - Read and write NDEF messages, advanced tag analysis, raw memory access</description>
     <license>MIT</license>
-    <keywords>nfc, NFC, NDEF</keywords>
-    <repo>https://github.com/EYALIN/community-cordova-plugin-nfc.git.git</repo>
-    <issue>https://github.com/EYALIN/community-cordova-plugin-nfc.git/issues</issue>
+    <keywords>cordova,nfc,ndef,ntag,mifare,rfid</keywords>
+    <repo>https://github.com/EYALIN/community-cordova-plugin-nfc</repo>
+    <issue>https://github.com/EYALIN/community-cordova-plugin-nfc/issues</issue>
 
     <platform name="android">
         <js-module src="www/phonegap-nfc.js" name="NFC">

@@ -1,33 +1,50 @@
 {
   "name": "community-cordova-plugin-nfc",
-  "version": "1.4.0",
-  "description": "Near Field Communication (NFC) Plugin. Read and write NDEF messages to NFC tags and share NDEF messages with peers.",
+  "version": "1.5.1",
+  "description": "Community Cordova NFC Plugin - Read and write NDEF messages, advanced tag analysis, raw memory access",
+  "main": "./types/index.d.ts",
+  "types": "./types/index.d.ts",
   "cordova": {
-    "id": "phonegap-nfc",
+    "id": "community-cordova-plugin-nfc",
     "platforms": [
       "android",
-      "wp8",
-      "windows",
-      "blackberry10",
       "ios"
     ]
   },
-  "repository": "EYALIN/community-cordova-plugin-nfc/tree/master",
+  "readme": "README.md",
+  "repository": "EYALIN/community-cordova-plugin-nfc",
+  "homepage": "https://github.com/EYALIN/community-cordova-plugin-nfc",
+  "funding": "https://github.com/sponsors/EYALIN",
+  "bugs": "https://github.com/EYALIN/community-cordova-plugin-nfc/issues",
   "keywords": [
+    "cordova",
     "nfc",
     "ndef",
+    "ntag",
+    "mifare",
+    "rfid",
+    "tag",
     "ecosystem:cordova",
-    "cordova",
     "cordova-android",
-    "cordova-wp8",
-    "cordova-windows",
-    "cordova-blackberry10",
     "cordova-ios"
   ],
+  "scripts": {
+    "test": "npm run lint",
+    "lint": "eslint ."
+  },
   "author": "Don Coleman <don.coleman@gmail.com>",
+  "contributors": [
+    "EYALIN"
+  ],
   "license": "MIT",
-  "homepage": "https://github.com/EYALIN/community-cordova-plugin-nfc/tree/master",
-  "funding": "https://github.com/sponsors/EYALIN",
-  "bugs": "https://github.com/EYALIN/community-cordova-plugin-nfc/issues"
-
+  "engines": {
+    "cordovaDependencies": {
+      "1.0.0": {
+        "cordova": ">100"
+      }
+    }
+  },
+  "devDependencies": {
+    "@cordova/eslint-config": "^3.0.0"
+  }
 }

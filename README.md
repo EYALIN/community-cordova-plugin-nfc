@@ -1,9 +1,8 @@
 [![NPM version](https://img.shields.io/npm/v/community-cordova-plugin-nfc)](https://www.npmjs.com/package/community-cordova-plugin-nfc)
 
-#### This is a fork of the original plugin phonegap-nfc
+# Community Cordova NFC Plugin
 
-# community-cordova-plugin-nfc
-
+A comprehensive Cordova plugin for NFC (Near Field Communication) on Android and iOS.
 
 I dedicate a considerable amount of my free time to developing and maintaining many cordova plugins for the community ([See the list with all my maintained plugins][community_plugins]).
 To help ensure this plugin is kept updated,
@@ -14,43 +13,50 @@ or if you're asking for new features or priority bug fixes. Thank you!
 
 [![](https://img.shields.io/static/v1?label=Sponsor%20Me&style=for-the-badge&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/eyalin)
 
+## Features
 
+- **Read/Write NDEF** - Read and write NDEF formatted NFC tags
+- **Raw Commands** - Send raw commands via transceive (ISO 14443-3A, ISO 14443-4, ISO 15693)
+- **Advanced Tag Analysis** (v1.5.0+) - Read raw memory, get NTAG version, counter, signature
+- **TypeScript Support** - Full TypeScript definitions included
 
-The NFC plugin allows you to read and write  NFC tags. You can also beam to, and receive from, other NFC enabled devices.
+## What's New in v1.5.0
 
-Use to
-* read data from NFC tags
-* write data to NFC tags
-* send data to other NFC enabled devices
-* receive data from NFC devices
-* send raw commands (ISO 14443-3A, ISO 14443-3A, ISO 14443-4, JIS 6319-4, ISO 15693) to NFC tags
+### Advanced Tag Analysis Methods
 
-This plugin uses NDEF (NFC Data Exchange Format) for maximum compatibilty between NFC devices, tag types, and operating systems.
+New methods for premium NFC tag analysis:
 
-Supported Platforms
--------------------
-* Android
-* [iOS 11](#ios-notes)
-* Windows (includes Windows Phone 8.1, Windows 8.1, Windows 10)
-* BlackBerry 10
-* Windows Phone 8
-* BlackBerry 7
+| Method | Description |
+|--------|-------------|
+| `readMemoryPages(startPage, numPages)` | Read raw memory pages from NTAG/MIFARE Ultralight |
+| `getNtagVersion()` | Get NTAG version info (IC type, memory size) |
+| `readNtagCounter()` | Read 24-bit NFC tap counter |
+| `readNtagSignature()` | Read 32-byte ECC originality signature |
+| `getPasswordProtectionStatus()` | Check password protection configuration |
+| `fullMemoryDump()` | Complete memory dump with automatic tag detection |
+
+## Supported Platforms
+
+- ✅ Android (API 16+)
+- ✅ iOS 11+ (CoreNFC)
+
+> Note: Legacy platforms (Windows, BlackBerry) are no longer actively maintained but may still work.
 
 ## Contents
 
 * [Installing](#installing)
+* [TypeScript Usage](#typescript-usage)
+* [Advanced Tag Analysis](#advanced-tag-analysis-v150)
 * [NFC](#nfc)
 * [NDEF](#ndef)
   - [NdefMessage](#ndefmessage)
   - [NdefRecord](#ndefrecord)
 * [Events](#events)
 * [Platform Differences](#platform-differences)
-* [BlackBerry 10 Invoke Target](#blackberry-10-invoke-target)
 * [Launching Application when Scanning a Tag](#launching-your-android-application-when-scanning-a-tag)
 * [Testing](#testing)
 * [Sample Projects](#sample-projects)
 * [Host Card Emulation (HCE)](#hce)
-* [Book](#book)
 * [License](#license)
 
 # Installing
@@ -71,11 +77,165 @@ Edit config.xml to install the plugin for [PhoneGap Build](http://build.phonegap
     <plugin name="phonegap-nfc" source="npm" />
 
 
-Windows Phone 8.1 should use the **windows** platform. The Silverlight based Windows Phone 8 code is no longer being maintained.
+Or from local path:
 
-BlackBerry 7 support is only available for Cordova 2.x. For applications targeting BlackBerry 7, you may need to use an older version of phonegap-nfc.
+```bash
+cordova plugin add /path/to/community-cordova-plugin-nfc
+```
 
-See [Getting Started](https://github.com/chariotsolutions/phonegap-nfc/blob/master/doc/GettingStartedCLI.md) and [Getting Started BlackBerry 10](https://github.com/chariotsolutions/phonegap-nfc/blob/master/doc/GettingStartedBlackberry10.md)for more details.
+# TypeScript Usage
+
+```typescript
+import { INdefTag, INtagVersionInfo, IFullMemoryDump } from 'community-cordova-plugin-nfc';
+
+declare var nfc: any;
+
+// Read NDEF tag (iOS)
+const tag: INdefTag = await nfc.scanNdef();
+console.log('Tag:', JSON.stringify(tag));
+
+// Get NTAG version info (Android - requires connect first)
+await nfc.connect('android.nfc.tech.NfcA');
+const version: INtagVersionInfo = await nfc.getNtagVersion();
+console.log('IC Type:', version.icType);
+
+// Full memory dump
+const dump: IFullMemoryDump = await nfc.fullMemoryDump();
+console.log('Memory:', dump.hexDump);
+await nfc.close();
+```
+
+# Advanced Tag Analysis (v1.5.0+)
+
+These methods require connecting to the tag first using `nfc.connect()`.
+
+## nfc.readMemoryPages
+
+Read raw memory pages from NTAG/MIFARE Ultralight tags.
+
+```javascript
+await nfc.connect('android.nfc.tech.NfcA');
+const memory = await nfc.readMemoryPages(0, 16);
+console.log('Memory:', util.arrayBufferToHexString(memory));
+await nfc.close();
+```
+
+### Parameters
+
+- __startPage__: Starting page number (0-based)
+- __numPages__: Number of pages to read
+
+### Returns
+
+- Promise with ArrayBuffer containing raw memory data
+
+## nfc.getNtagVersion
+
+Get NTAG version information using GET_VERSION command (0x60).
+
+```javascript
+await nfc.connect('android.nfc.tech.NfcA');
+const version = await nfc.getNtagVersion();
+console.log('IC Type:', version.icType);
+console.log('Storage Size:', version.storageSize);
+await nfc.close();
+```
+
+### Returns
+
+- Promise with version info object:
+  - `vendorId`: Vendor ID (0x04 = NXP)
+  - `productType`: Product type (0x04 = NTAG, 0x03 = MIFARE Ultralight)
+  - `storageSize`: Storage size indicator
+  - `icType`: Human-readable IC type string (e.g., "NTAG215")
+
+## nfc.readNtagCounter
+
+Read the NTAG 24-bit NFC tap counter.
+
+```javascript
+await nfc.connect('android.nfc.tech.NfcA');
+const counter = await nfc.readNtagCounter();
+console.log('Tag has been tapped', counter, 'times');
+await nfc.close();
+```
+
+### Returns
+
+- Promise with counter value (0 to 16,777,215)
+
+## nfc.readNtagSignature
+
+Read the NTAG 32-byte ECC originality signature.
+
+```javascript
+await nfc.connect('android.nfc.tech.NfcA');
+const signature = await nfc.readNtagSignature();
+console.log('Signature:', util.arrayBufferToHexString(signature));
+await nfc.close();
+```
+
+### Returns
+
+- Promise with 32-byte signature as ArrayBuffer
+
+## nfc.getPasswordProtectionStatus
+
+Check password protection configuration.
+
+```javascript
+await nfc.connect('android.nfc.tech.NfcA');
+const status = await nfc.getPasswordProtectionStatus();
+console.log('Protected:', status.isProtected);
+console.log('Protection starts at page:', status.protectionStartPage);
+await nfc.close();
+```
+
+### Parameters
+
+- __configPage__: (Optional) Config page number, defaults to NTAG216 config page
+
+### Returns
+
+- Promise with protection status object:
+  - `protectionStartPage`: Page where protection starts
+  - `isProtected`: Whether protection is enabled
+  - `readProtected`: Whether read is protected
+  - `writeProtected`: Whether write is protected
+  - `authLimitEnabled`: Whether auth limit is enabled
+  - `authLimitCounter`: Auth attempt counter (0-7)
+
+## nfc.fullMemoryDump
+
+Perform complete memory dump with automatic tag type detection.
+
+```javascript
+await nfc.connect('android.nfc.tech.NfcA');
+const dump = await nfc.fullMemoryDump();
+if (dump.success) {
+    console.log('Tag Type:', dump.tagType);
+    console.log('Total Pages:', dump.totalPages);
+    console.log('Hex Dump:', dump.hexDump);
+}
+await nfc.close();
+```
+
+### Returns
+
+- Promise with dump result object:
+  - `success`: Whether dump succeeded
+  - `tagType`: Detected tag type string
+  - `version`: NTAG version info (if available)
+  - `totalPages`: Total pages in tag
+  - `memoryDump`: Raw memory as ArrayBuffer
+  - `hexDump`: Memory as hex string
+  - `error`: Error message (if failed)
+
+### Supported Platforms
+
+- Android (requires `nfc.connect()` first)
+
+---
 
 ## iOS Notes
 
