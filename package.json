@@ -1,6 +1,6 @@
 {
   "name": "community-cordova-plugin-nfc",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Community Cordova NFC Plugin - Read and write NDEF messages, advanced tag analysis, raw memory access",
   "main": "./types/index.d.ts",
   "types": "./types/index.d.ts",
