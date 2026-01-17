@@ -582,6 +582,242 @@ var nfc = {
 
     disableReaderMode: function(successCallback, errorCallback) {
         cordova.exec(successCallback, errorCallback, 'NfcPlugin', 'disableReaderMode', []);
+    },
+
+    // ============================================================
+    // Advanced Tag Analysis Methods (for premium features)
+    // ============================================================
+
+    /**
+     * Read raw memory pages from an NTAG/MIFARE Ultralight tag
+     * Uses the READ command (0x30) which reads 4 pages (16 bytes) at a time
+     *
+     * @param startPage - The starting page number (0-based)
+     * @param numPages - Number of pages to read (will read in blocks of 4)
+     * @returns Promise<ArrayBuffer> - Raw memory data
+     */
+    readMemoryPages: function(startPage, numPages) {
+        return new Promise(function(resolve, reject) {
+            var pages = [];
+            var currentPage = startPage;
+            var endPage = startPage + numPages;
+
+            function readNextBlock() {
+                if (currentPage >= endPage) {
+                    // Combine all page data
+                    var totalLength = pages.reduce(function(sum, p) { return sum + p.length; }, 0);
+                    var result = new Uint8Array(totalLength);
+                    var offset = 0;
+                    pages.forEach(function(p) {
+                        result.set(new Uint8Array(p), offset);
+                        offset += p.length;
+                    });
+                    resolve(result.buffer);
+                    return;
+                }
+
+                // NTAG READ command: 0x30 followed by page number
+                var cmd = new Uint8Array([0x30, currentPage]);
+                nfc.transceive(cmd.buffer).then(function(response) {
+                    // READ returns 16 bytes (4 pages)
+                    pages.push(response);
+                    currentPage += 4;
+                    readNextBlock();
+                }).catch(function(error) {
+                    reject(error);
+                });
+            }
+
+            readNextBlock();
+        });
+    },
+
+    /**
+     * Get NTAG version information
+     * Sends GET_VERSION command (0x60) to identify tag type
+     *
+     * @returns Promise<Object> - Tag version info including IC type, memory size
+     */
+    getNtagVersion: function() {
+        return new Promise(function(resolve, reject) {
+            // GET_VERSION command
+            var cmd = new Uint8Array([0x60]);
+            nfc.transceive(cmd.buffer).then(function(response) {
+                var data = new Uint8Array(response);
+                if (data.length >= 8) {
+                    resolve({
+                        vendorId: data[1],
+                        productType: data[2],
+                        productSubtype: data[3],
+                        majorVersion: data[4],
+                        minorVersion: data[5],
+                        storageSize: data[6],
+                        protocolType: data[7],
+                        icType: nfc._parseIcType(data[2], data[6])
+                    });
+                } else {
+                    reject('Invalid GET_VERSION response');
+                }
+            }).catch(reject);
+        });
+    },
+
+    /**
+     * Read NTAG counter value (if supported)
+     * Sends READ_CNT command (0x39) with counter address 0x02
+     *
+     * @returns Promise<number> - Counter value (24-bit)
+     */
+    readNtagCounter: function() {
+        return new Promise(function(resolve, reject) {
+            // READ_CNT command with counter address
+            var cmd = new Uint8Array([0x39, 0x02]);
+            nfc.transceive(cmd.buffer).then(function(response) {
+                var data = new Uint8Array(response);
+                if (data.length >= 3) {
+                    // Counter is 3 bytes, LSB first
+                    var counter = data[0] | (data[1] << 8) | (data[2] << 16);
+                    resolve(counter);
+                } else {
+                    reject('Invalid READ_CNT response');
+                }
+            }).catch(reject);
+        });
+    },
+
+    /**
+     * Read NTAG signature (originality check)
+     * Sends READ_SIG command (0x3C)
+     *
+     * @returns Promise<ArrayBuffer> - 32-byte ECC signature
+     */
+    readNtagSignature: function() {
+        return new Promise(function(resolve, reject) {
+            // READ_SIG command
+            var cmd = new Uint8Array([0x3C, 0x00]);
+            nfc.transceive(cmd.buffer).then(function(response) {
+                var data = new Uint8Array(response);
+                if (data.length >= 32) {
+                    resolve(response);
+                } else {
+                    reject('Invalid READ_SIG response');
+                }
+            }).catch(reject);
+        });
+    },
+
+    /**
+     * Check if tag password protection is enabled
+     * Reads the configuration pages to determine auth status
+     *
+     * @param configPage - The config page number (varies by tag type)
+     * @returns Promise<Object> - Password protection status
+     */
+    getPasswordProtectionStatus: function(configPage) {
+        return new Promise(function(resolve, reject) {
+            // Default config page for NTAG213/215/216 is different
+            var page = configPage || 41; // NTAG216 default
+            var cmd = new Uint8Array([0x30, page]);
+            nfc.transceive(cmd.buffer).then(function(response) {
+                var data = new Uint8Array(response);
+                // Parse AUTH0 and ACCESS config
+                var auth0 = data[3]; // Page address for password protection
+                var access = data[4]; // Access configuration byte
+                resolve({
+                    protectionStartPage: auth0,
+                    isProtected: auth0 < 255,
+                    readProtected: (access & 0x80) !== 0,
+                    writeProtected: true, // Write is always protected if auth0 < max
+                    authLimitEnabled: (access & 0x07) !== 0,
+                    authLimitCounter: access & 0x07
+                });
+            }).catch(reject);
+        });
+    },
+
+    /**
+     * Perform a full memory dump of the tag
+     * Automatically detects tag type and reads all user memory
+     *
+     * @returns Promise<Object> - Complete memory dump with metadata
+     */
+    fullMemoryDump: function() {
+        return new Promise(function(resolve, reject) {
+            var result = {
+                success: false,
+                tagType: 'unknown',
+                totalPages: 0,
+                memoryDump: null,
+                hexDump: '',
+                error: null
+            };
+
+            // First try to get version to identify tag
+            nfc.getNtagVersion().then(function(version) {
+                result.tagType = version.icType;
+                result.version = version;
+
+                // Determine number of pages based on tag type
+                var pages = 45; // Default for NTAG213
+                if (version.icType.indexOf('215') !== -1) {
+                    pages = 135;
+                } else if (version.icType.indexOf('216') !== -1) {
+                    pages = 231;
+                } else if (version.icType.indexOf('210') !== -1) {
+                    pages = 20;
+                } else if (version.icType.indexOf('212') !== -1) {
+                    pages = 41;
+                }
+
+                result.totalPages = pages;
+                return nfc.readMemoryPages(0, pages);
+            }).then(function(memoryData) {
+                result.memoryDump = memoryData;
+                result.hexDump = util.arrayBufferToHexString(memoryData);
+                result.success = true;
+                resolve(result);
+            }).catch(function(error) {
+                // If GET_VERSION fails, try reading as MIFARE Ultralight
+                result.tagType = 'MIFARE Ultralight (Classic)';
+                result.totalPages = 16;
+
+                nfc.readMemoryPages(0, 16).then(function(memoryData) {
+                    result.memoryDump = memoryData;
+                    result.hexDump = util.arrayBufferToHexString(memoryData);
+                    result.success = true;
+                    resolve(result);
+                }).catch(function(error2) {
+                    result.error = error2;
+                    reject(result);
+                });
+            });
+        });
+    },
+
+    /**
+     * Parse IC type from GET_VERSION response
+     * @private
+     */
+    _parseIcType: function(productType, storageSize) {
+        if (productType === 0x04) {
+            // NTAG family
+            switch(storageSize) {
+                case 0x0F: return 'NTAG213';
+                case 0x11: return 'NTAG215';
+                case 0x13: return 'NTAG216';
+                case 0x0B: return 'NTAG210';
+                case 0x0E: return 'NTAG212';
+                default: return 'NTAG (unknown variant)';
+            }
+        } else if (productType === 0x03) {
+            // MIFARE Ultralight family
+            switch(storageSize) {
+                case 0x0B: return 'MIFARE Ultralight EV1 (48 bytes)';
+                case 0x0E: return 'MIFARE Ultralight EV1 (128 bytes)';
+                default: return 'MIFARE Ultralight (unknown variant)';
+            }
+        }
+        return 'Unknown NFC tag';
     }
 
 };
