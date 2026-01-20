@@ -378,7 +378,24 @@ public class NfcPlugin extends CordovaPlugin {
    private void writeNdefMessage(final NdefMessage message, final Tag tag, final CallbackContext callbackContext) {
        cordova.getThreadPool().execute(() -> {
            try {
-               Ndef ndef = Ndef.get(tag);
+               // Try to get the freshest tag available
+               Tag freshTag = tag;
+               Intent currentIntent = getIntent();
+               if (currentIntent != null) {
+                   Tag intentTag = currentIntent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+                   if (intentTag != null) {
+                       freshTag = intentTag;
+                   }
+               }
+               // Also check savedIntent for fresh tag
+               if (savedIntent != null) {
+                   Tag savedTag = savedIntent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+                   if (savedTag != null) {
+                       freshTag = savedTag;
+                   }
+               }
+
+               Ndef ndef = Ndef.get(freshTag);
                if (ndef != null) {
                    ndef.connect();
                    if (ndef.isWritable()) {
@@ -394,7 +411,7 @@ public class NfcPlugin extends CordovaPlugin {
                    }
                    ndef.close();
                } else {
-                   NdefFormatable formatable = NdefFormatable.get(tag);
+                   NdefFormatable formatable = NdefFormatable.get(freshTag);
                    if (formatable != null) {
                        formatable.connect();
                        formatable.format(message);
@@ -403,6 +420,14 @@ public class NfcPlugin extends CordovaPlugin {
                    } else {
                        callbackContext.error("Tag doesn't support NDEF");
                    }
+               }
+           } catch (SecurityException e) {
+               // Tag out of date - the tag handle has expired
+               String errorMessage = e.getMessage();
+               if (errorMessage != null && errorMessage.contains("out of date")) {
+                   callbackContext.error("Tag connection expired. Please tap the tag again and write immediately.");
+               } else {
+                   callbackContext.error(errorMessage != null ? errorMessage : "Security error writing to tag");
                }
            } catch (FormatException e) {
                callbackContext.error(e.getMessage());
@@ -550,13 +575,41 @@ public class NfcPlugin extends CordovaPlugin {
 
             if (nfcAdapter != null && !getActivity().isFinishing()) {
                 try {
-                    IntentFilter[] intentFilters = getIntentFilters();
-                    String[][] techLists = getTechLists();
-                    if (intentFilters.length > 0 || techLists.length > 0) {
-                        nfcAdapter.enableForegroundDispatch(getActivity(), getPendingIntent(), intentFilters, techLists);
+                    IntentFilter[] filters = getIntentFilters();
+                    String[][] techs = getTechLists();
+
+                    // Validate intent filters - remove any null or invalid entries
+                    List<IntentFilter> validFilters = new ArrayList<>();
+                    for (IntentFilter filter : filters) {
+                        if (filter != null && filter.countActions() > 0) {
+                            validFilters.add(filter);
+                        }
+                    }
+                    IntentFilter[] cleanFilters = validFilters.toArray(new IntentFilter[0]);
+
+                    // Android requires: if techLists is non-empty, filters must also be non-empty and valid
+                    // If we have tech lists but no valid filters, add a generic TECH_DISCOVERED filter
+                    if (techs.length > 0 && cleanFilters.length == 0) {
+                        cleanFilters = new IntentFilter[] { new IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED) };
+                    }
+
+                    // Only call enableForegroundDispatch if we have valid filters
+                    if (cleanFilters.length > 0) {
+                        nfcAdapter.enableForegroundDispatch(getActivity(), getPendingIntent(), cleanFilters, techs);
+                    } else if (techs.length == 0) {
+                        // No filters and no tech lists - use null to disable filtering (receive all tags)
+                        nfcAdapter.enableForegroundDispatch(getActivity(), getPendingIntent(), null, null);
                     }
                 } catch (IllegalStateException e) {
                     Log.w(TAG, "Illegal State Exception starting NFC. Assuming application is terminating.");
+                } catch (IllegalArgumentException e) {
+                    Log.e(TAG, "Illegal Argument Exception starting NFC: " + e.getMessage());
+                    // Fallback: try with null filters to receive all NFC events
+                    try {
+                        nfcAdapter.enableForegroundDispatch(getActivity(), getPendingIntent(), null, null);
+                    } catch (Exception fallbackEx) {
+                        Log.e(TAG, "Fallback enableForegroundDispatch also failed: " + fallbackEx.getMessage());
+                    }
                 }
             }
         });

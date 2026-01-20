@@ -30,16 +30,29 @@ public class Util {
                     json.put("techTypes", new JSONArray(Arrays.asList(tag.getTechList())));
                 }
 
-                json.put("type", translateType(ndef.getType()));
-                json.put("maxSize", ndef.getMaxSize());
-                json.put("isWritable", ndef.isWritable());
+                // These calls can throw SecurityException if tag is out of date
+                try {
+                    json.put("type", translateType(ndef.getType()));
+                    json.put("maxSize", ndef.getMaxSize());
+                    json.put("isWritable", ndef.isWritable());
+                } catch (SecurityException e) {
+                    Log.w(TAG, "Tag out of date, using defaults for type/maxSize/isWritable: " + e.getMessage());
+                    json.put("type", "Unknown");
+                    json.put("maxSize", 0);
+                    json.put("isWritable", false);
+                }
+
                 json.put("ndefMessage", messageToJSON(ndef.getCachedNdefMessage()));
                 // Workaround for bug in ICS (Android 4.0 and 4.0.1) where
                 // mTag.getTagService(); of the Ndef object sometimes returns null
                 // see http://issues.mroland.at/index.php?do=details&task_id=47
+                // Also catch SecurityException for "tag out of date" errors
                 try {
                   json.put("canMakeReadOnly", ndef.canMakeReadOnly());
                 } catch (NullPointerException e) {
+                  json.put("canMakeReadOnly", JSONObject.NULL);
+                } catch (SecurityException e) {
+                  Log.w(TAG, "Tag out of date for canMakeReadOnly: " + e.getMessage());
                   json.put("canMakeReadOnly", JSONObject.NULL);
                 }
             } catch (JSONException e) {
