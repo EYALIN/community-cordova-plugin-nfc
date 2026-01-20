@@ -7,7 +7,7 @@
     xmlns="http://apache.org/cordova/ns/plugins/1.0"
     xmlns:android="http://schemas.android.com/apk/res/android"
     id="community-cordova-plugin-nfc"
-    version="1.5.4">
+    version="1.5.5">
 
     <name>NFC</name>
     <description>Community Cordova NFC Plugin - Read and write NDEF messages, advanced tag analysis, raw memory access</description>
@@ -120,16 +120,15 @@
         </config-file>
 
         <!-- https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_nfc_readersession_formats?language=objc -->
+        <!-- Note: NDEF is deprecated/disallowed in iOS SDK 26.1+ (iOS 18+). Use TAG only. -->
         <config-file parent="com.apple.developer.nfc.readersession.formats" platform="ios" target="*-Debug.plist">
             <array>
-                <string>NDEF</string>
-                <string>TAG</string>  
+                <string>TAG</string>
             </array>
         </config-file>
         <config-file parent="com.apple.developer.nfc.readersession.formats" platform="ios" target="*-Release.plist">
             <array>
-                <string>NDEF</string>
-                <string>TAG</string>  
+                <string>TAG</string>
             </array>
         </config-file>
         
