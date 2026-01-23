@@ -18,7 +18,7 @@
 
     <platform name="android">
         <js-module src="www/phonegap-nfc.js" name="NFC">
-            <runs />
+            <clobbers target="NfcPlugin" />
         </js-module>
 
         <config-file target="res/xml/config.xml" parent="/*">
@@ -42,7 +42,7 @@
 
     <platform name="wp8">
         <js-module src="www/phonegap-nfc.js" name="NFC">
-            <runs />
+            <clobbers target="NfcPlugin" />
         </js-module>
 
         <config-file target="config.xml" parent="/*">
@@ -63,7 +63,7 @@
     <!-- windows -->
     <platform name="windows">
         <js-module src="www/phonegap-nfc.js" name="NFC">
-            <runs />
+            <clobbers target="NfcPlugin" />
         </js-module>
 
         <config-file target="config.xml" parent="/*">
@@ -92,7 +92,7 @@
 
     <platform name="blackberry10">
         <js-module src="www/phonegap-nfc.js" name="NFC">
-            <runs />
+            <clobbers target="NfcPlugin" />
         </js-module>
         <!-- override defaults for BB10 -->
         <js-module src="www/phonegap-nfc-blackberry.js" name="NFCBB10">
@@ -110,7 +110,7 @@
 
     <platform name="ios">
         <js-module src="www/phonegap-nfc.js" name="NFC">
-            <runs />
+            <clobbers target="NfcPlugin" />
         </js-module>
 
         <config-file parent="/*" target="config.xml">

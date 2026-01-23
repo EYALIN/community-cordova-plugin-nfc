@@ -1123,19 +1123,12 @@ nfc.bytesToString = util.bytesToString;
 nfc.stringToBytes = util.stringToBytes;
 nfc.bytesToHexString = util.bytesToHexString;
 
-// kludge some global variables for plugman js-module support
-// eventually these should be replaced and referenced via the module
-window.nfc = nfc;
-window.ndef = ndef;
-window.util = util;
-window.fireNfcTagEvent = fireNfcTagEvent;
-
-// This channel receives nfcEvent data from native code 
+// This channel receives nfcEvent data from native code
 // and fires JavaScript events.
 require('cordova/channel').onCordovaReady.subscribe(function() {
   require('cordova/exec')(success, null, 'NfcPlugin', 'channel', []);
   function success(message) {
-    if (!message.type) { 
+    if (!message.type) {
         console.log(message);
     } else {
         console.log("Received NFC data, firing '" + message.type + "' event");
@@ -1146,3 +1139,13 @@ require('cordova/channel').onCordovaReady.subscribe(function() {
     }
   }
 });
+
+// Export using same convention as SecurityPlugin
+// NfcPlugin is the main export (clobbered via plugin.xml)
+// NdefPlugin and NfcUtil are properties on the export
+var NfcPluginExport = nfc;
+NfcPluginExport.NdefPlugin = ndef;
+NfcPluginExport.NfcUtil = util;
+NfcPluginExport.fireNfcTagEvent = fireNfcTagEvent;
+
+module.exports = NfcPluginExport;
