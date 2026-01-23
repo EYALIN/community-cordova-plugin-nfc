@@ -206,6 +206,28 @@ export interface INfcPlugin {
         onError?: (error: string) => void
     ): void;
 
+    /**
+     * Register for tag discovered events (non-NDEF tags and NDEF tags)
+     * @param callback - Called when tag is detected
+     * @param onSuccess - Called on successful registration
+     * @param onError - Called on error
+     */
+    addTagDiscoveredListener(
+        callback: (event: INfcEvent) => void,
+        onSuccess?: () => void,
+        onError?: (error: string) => void
+    ): void;
+
+    /**
+     * Remove tag discovered listener
+     * @param onSuccess - Called on success
+     * @param onError - Called on error
+     */
+    removeTagDiscoveredListener(
+        onSuccess?: () => void,
+        onError?: (error: string) => void
+    ): void;
+
     // ========== NFC Status ==========
 
     /**
@@ -292,6 +314,16 @@ export interface INfcPlugin {
 // ============================================
 
 export interface INdefUtil {
+    /**
+     * Create a generic NDEF record
+     * @param tnf - Type Name Format (0-7)
+     * @param type - Record type as byte array or string
+     * @param id - Record ID as byte array or string
+     * @param payload - Payload as byte array or string
+     * @returns NDEF record
+     */
+    record(tnf: number, type: number[] | string, id: number[] | string, payload: number[] | string): INdefRecord;
+
     /**
      * Create a text record
      * @param text - Text content
@@ -408,22 +440,29 @@ export interface ITnf {
 }
 
 // ============================================
+// Combined Plugin Interface (following SecurityPlugin pattern)
+// ============================================
+
+export interface NfcManager extends INfcPlugin {
+    /** NDEF helper utilities */
+    NdefPlugin: INdefUtil;
+    /** General utilities */
+    NfcUtil: IUtil;
+    /** Fire NFC tag event */
+    fireNfcTagEvent: (eventType: string, tagAsJson: string) => void;
+}
+
+// ============================================
 // Global Declarations
 // ============================================
 
 declare global {
     interface Window {
-        nfc: INfcPlugin;
-        ndef: INdefUtil;
-        util: IUtil;
+        NfcPlugin: NfcManager;
     }
 
-    /** NFC Plugin instance */
-    var nfc: INfcPlugin;
-    /** NDEF helper utilities */
-    var ndef: INdefUtil;
-    /** General utilities */
-    var util: IUtil;
+    /** NFC Plugin instance (following SecurityPlugin pattern) */
+    var NfcPlugin: NfcManager;
 }
 
-export default INfcPlugin;
+export default NfcManager;
