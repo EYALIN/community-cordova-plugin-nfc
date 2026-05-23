@@ -1149,3 +1149,11 @@ NfcPluginExport.NfcUtil = util;
 NfcPluginExport.fireNfcTagEvent = fireNfcTagEvent;
 
 module.exports = NfcPluginExport;
+
+// Legacy globals for backwards compatibility.
+// @awesome-cordova-plugins/nfc and phonegap-nfc detect the plugin via window.nfc.
+// These are additive and do not affect the NfcPlugin module export above.
+window.nfc = nfc;
+window.ndef = ndef;
+window.util = util;
+window.fireNfcTagEvent = fireNfcTagEvent;
