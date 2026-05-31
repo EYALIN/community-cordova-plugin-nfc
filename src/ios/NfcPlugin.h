@@ -32,6 +32,9 @@
 - (void)enabled:(CDVInvokedUrlCommand *)command;
 - (void)writeTag:(CDVInvokedUrlCommand *)command;
 
+// ISO 7816 APDU exchange (added v1.7.0) - mirrors Android nfc.transceive
+- (void)transceive:(CDVInvokedUrlCommand *)command;
+
 // Internal implementation
 - (void)channel:(CDVInvokedUrlCommand *)command;
 

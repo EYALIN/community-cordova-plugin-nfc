@@ -12,6 +12,9 @@
     NSString* channelCallbackId;
     id<NFCNDEFTag> connectedTag API_AVAILABLE(ios(13.0));
     NFCNDEFStatus connectedTagStatus API_AVAILABLE(ios(13.0));
+    // Held when an ISO 7816 tag is connected and keepSessionOpen=YES so that
+    // subsequent JS calls to nfc.transceive() can exchange APDUs. (v1.7.0)
+    id<NFCISO7816Tag> connectedISO7816Tag API_AVAILABLE(ios(13.0));
 }
 @property (nonatomic, assign) BOOL writeMode;
 @property (nonatomic, assign) BOOL shouldUseTagReaderSession;
@@ -154,6 +157,9 @@
     }
     connectedTag = NULL;
     connectedTagStatus = NFCNDEFStatusNotSupported;
+    if (@available(iOS 13.0, *)) {
+        connectedISO7816Tag = NULL;
+    }
     CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
@@ -197,6 +203,73 @@
         pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"NO_NFC"];
     }
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+}
+
+// nfc.transceive(buffer) — added v1.7.0 to match Android IsoDep.transceive.
+// Requires an ISO 7816-compatible tag detected via scanTag({keepSessionOpen:true}).
+// Resolves with an ArrayBuffer containing the APDU response data with sw1/sw2
+// appended (Android IsoDep semantics).
+- (void)transceive:(CDVInvokedUrlCommand *)command {
+    NSLog(@"transceive");
+
+    if (@available(iOS 13.0, *)) {
+        if (self.nfcSession == nil || !self.nfcSession.isReady) {
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"No active NFC session. Call nfc.scanTag({keepSessionOpen:true}) first."];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+
+        if (connectedISO7816Tag == nil) {
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"No ISO 7816 tag connected. Only ISO 7816-compatible tags support transceive on iOS."];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+
+        // Cordova-iOS converts a JS ArrayBuffer argument into an NSData.
+        id arg = [command argumentAtIndex:0];
+        NSData *apduData = nil;
+        if ([arg isKindOfClass:[NSData class]]) {
+            apduData = (NSData *)arg;
+        } else if ([arg isKindOfClass:[NSArray class]]) {
+            // Fallback if a uint8 array was sent instead of an ArrayBuffer.
+            apduData = [self uint8ArrayToNSData:(NSArray *)arg];
+        }
+
+        if (apduData == nil || apduData.length < 4) {
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Invalid APDU: expected at least 4 bytes (CLA INS P1 P2)."];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+
+        NFCISO7816APDU *apdu = [[NFCISO7816APDU alloc] initWithData:apduData];
+        if (apdu == nil) {
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Invalid APDU encoding."];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+
+        NSString *callbackId = [command.callbackId copy];
+
+        [connectedISO7816Tag sendCommandAPDU:apdu completionHandler:^(NSData * _Nonnull responseData, uint8_t sw1, uint8_t sw2, NSError * _Nullable error) {
+            if (error) {
+                NSLog(@"transceive error: %@", error);
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:error.localizedDescription];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+                return;
+            }
+
+            // Match Android IsoDep.transceive: response data with sw1/sw2 appended.
+            NSMutableData *full = [NSMutableData dataWithData:responseData ?: [NSData data]];
+            [full appendBytes:&sw1 length:1];
+            [full appendBytes:&sw2 length:1];
+
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArrayBuffer:full];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+        }];
+    } else {
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"transceive requires iOS 13 or later."];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+    }
 }
 
 #pragma mark - NFCNDEFReaderSessionDelegate
@@ -274,11 +347,22 @@
     id<NFCTag> tag = [tags firstObject];
     NSMutableDictionary *tagMetaData = [self getTagInfo:tag];
     id<NFCNDEFTag> ndefTag = (id<NFCNDEFTag>)tag;
-    
+
     [session connectToTag:tag completionHandler:^(NSError * _Nullable error) {
         if (error) {
             NSLog(@"%@", error);
             [self closeSession:session withError:[self localizeString:@"NFCErrorTagConnection" defaultValue:@"Error connecting to tag."]];
+            return;
+        }
+
+        // ISO 7816 + keepSessionOpen path (v1.7.0): hold the tag for subsequent
+        // nfc.transceive() APDU exchanges. Skip the NDEF path entirely since
+        // ISO 7816 tags (gov ID, banking, health) are typically non-NDEF and
+        // processNDEFTag would close the session on NFCNDEFStatusNotSupported.
+        if (tag.type == NFCTagTypeISO7816Compatible && self.keepSessionOpen) {
+            self->connectedISO7816Tag = [tag asNFCISO7816Tag];
+            session.alertMessage = [self localizeString:@"NFCTagRead" defaultValue:@"Tag successfully read."];
+            [self fireTagEvent:tagMetaData];
             return;
         }
 
@@ -494,6 +578,9 @@
     sessionCallbackId = NULL;
     connectedTag = NULL;
     connectedTagStatus = NFCNDEFStatusNotSupported;
+    if (@available(iOS 13.0, *)) {
+        connectedISO7816Tag = NULL;
+    }
     [session invalidateSession];
 }
 
@@ -504,7 +591,10 @@
     sessionCallbackId = NULL;
     connectedTag = NULL;
     connectedTagStatus = NFCNDEFStatusNotSupported;
-    
+    if (@available(iOS 13.0, *)) {
+        connectedISO7816Tag = NULL;
+    }
+
     if (@available(iOS 13.0, *)) {
         [session invalidateSessionWithErrorMessage:errorMessage];
     } else {
