@@ -435,6 +435,13 @@ public class NfcPlugin extends CordovaPlugin {
                callbackContext.error(e.getMessage());
            } catch (IOException e) {
                callbackContext.error(e.getMessage());
+           } catch (Exception e) {
+               // Catch-all: this runs on a thread-pool runnable, so ANY uncaught exception
+               // crashes the app. Covers stale-tag SecurityException variants that don't contain
+               // "out of date", IllegalStateException, NPE, etc. — surface as a JS error instead.
+               Log.e(TAG, "Unexpected error writing NDEF message", e);
+               String msg = e.getMessage();
+               callbackContext.error(msg != null ? msg : "Failed to write tag. Please tap the tag again.");
            }
        });
    }
@@ -610,6 +617,10 @@ public class NfcPlugin extends CordovaPlugin {
                     } catch (Exception fallbackEx) {
                         Log.e(TAG, "Fallback enableForegroundDispatch also failed: " + fallbackEx.getMessage());
                     }
+                } catch (Exception e) {
+                    // Catch-all: runs on the UI thread runnable, so any uncaught exception (e.g.
+                    // SecurityException, NPE from a null PendingIntent/adapter) would crash the app.
+                    Log.e(TAG, "Unexpected error starting NFC foreground dispatch: " + e.getMessage());
                 }
             }
         });
