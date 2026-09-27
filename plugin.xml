@@ -7,7 +7,7 @@
     xmlns="http://apache.org/cordova/ns/plugins/1.0"
     xmlns:android="http://schemas.android.com/apk/res/android"
     id="community-cordova-plugin-nfc"
-    version="1.7.1">
+    version="1.8.0">
 
     <name>NFC</name>
     <description>Community Cordova NFC Plugin - Read and write NDEF messages, advanced tag analysis, raw memory access</description>
@@ -35,77 +35,21 @@
 
         <config-file target="AndroidManifest.xml" parent="/manifest">
             <uses-permission android:name="android.permission.NFC"/>
-            <uses-feature android:name="android.hardware.nfc" android:required="false"/>
+            <uses-feature android:name="android.hardware.nfc" android:required="$NFC_REQUIRED"/>
         </config-file>
 
-    </platform>
+        <!-- Background tag reading (1.8.0): NFC_INTENT_FILTERS = none | any of ndef,tech,tag.
+             scripts/android-nfc-intent-filters.js writes the launcher-activity intent filters. -->
+        <preference name="NFC_INTENT_FILTERS" default="none" />
+        <preference name="NFC_NDEF_MIME_TYPES" default="*/*" />
+        <!-- APP-121: apps that are useless without NFC hardware (e.g. an NFC reader/writer) can set
+             this to "true" so Google Play stops offering the app to phones without an NFC radio.
+             Default stays "false" so existing consumers (an app that only USES NFC when present,
+             e.g. an NFC checker/detector) are unaffected. -->
+        <preference name="NFC_REQUIRED" default="false" />
+        <hook type="after_prepare" src="scripts/android-nfc-intent-filters.js" />
+        <hook type="before_plugin_uninstall" src="scripts/android-nfc-intent-filters.js" />
 
-    <platform name="wp8">
-        <js-module src="www/phonegap-nfc.js" name="NFC">
-            <clobbers target="NfcPlugin" />
-        </js-module>
-
-        <config-file target="config.xml" parent="/*">
-            <feature name="NfcPlugin">
-                <param name="wp-package" value="NfcPlugin"/>
-            </feature>
-        </config-file>
-
-        <config-file target="Properties/WMAppManifest.xml" parent="/Deployment/App/Capabilities">
-            <Capability Name="ID_CAP_PROXIMITY" />
-        </config-file>
-
-        <source-file src="src/windows-phone-8/Ndef.cs" />
-        <source-file src="src/windows-phone-8/NfcPlugin.cs" />
-
-    </platform>
-
-    <!-- windows -->
-    <platform name="windows">
-        <js-module src="www/phonegap-nfc.js" name="NFC">
-            <clobbers target="NfcPlugin" />
-        </js-module>
-
-        <config-file target="config.xml" parent="/*">
-            <feature name="NfcPlugin">
-                <param name="wp-package" value="NfcPlugin"/>
-            </feature>
-        </config-file>
-
-        <config-file target="package.phone.appxmanifest" parent="/Package/Capabilities">
-            <DeviceCapability Name="proximity" />
-        </config-file>
-        <config-file target="package.windows.appxmanifest" parent="/Package/Capabilities">
-            <DeviceCapability Name="proximity" />
-        </config-file>
-        <config-file target="package.windows10.appxmanifest" parent="/Package/Capabilities">
-            <DeviceCapability Name="proximity" />
-        </config-file>
-        <config-file target="package.windows80.appxmanifest" parent="/Package/Capabilities">
-            <DeviceCapability Name="proximity" />
-        </config-file>
-
-        <js-module src="src/windows/nfc-plugin.js" name="NfcPlugin">
-            <merges target="" />
-        </js-module>
-    </platform>
-
-    <platform name="blackberry10">
-        <js-module src="www/phonegap-nfc.js" name="NFC">
-            <clobbers target="NfcPlugin" />
-        </js-module>
-        <!-- override defaults for BB10 -->
-        <js-module src="www/phonegap-nfc-blackberry.js" name="NFCBB10">
-            <runs />
-        </js-module>
-
-        <!-- "native" implementation -->
-        <source-file src="src/blackberry10/index.js" />
-
-        <config-file target="www/config.xml" parent="/widget">
-            <!-- Note: mapping is broken in Cordova 3.1.0-0.2.0 -->
-            <feature name="NfcPlugin" value="com.chariotsolutions.nfc.plugin" />
-        </config-file>
     </platform>
 
     <platform name="ios">
@@ -139,7 +83,10 @@
         <framework src="CoreNFC.framework" weak="true" />
 
         <preference name="NFC_USAGE_DESCRIPTION" default="Read NFC Tags" />
-        <config-file target="App/App-Info.plist" parent="NFCReaderUsageDescription">
+        <!-- "*-Info.plist" resolves to App/App-Info.plist on cordova-ios 8 and to <Name>/<Name>-Info.plist
+             on cordova-ios 7 and older (1.5.4-1.7.1 targeted App/App-Info.plist only, so apps on
+             cordova-ios <= 7 shipped without the usage string and crashed on the first scan). -->
+        <config-file target="*-Info.plist" parent="NFCReaderUsageDescription">
             <string>$NFC_USAGE_DESCRIPTION</string>
         </config-file>
     </platform>

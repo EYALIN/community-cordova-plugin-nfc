@@ -20,7 +20,14 @@ or if you're asking for new features or priority bug fixes. Thank you!
 - **Advanced Tag Analysis** (v1.5.0+) - Read raw memory, get NTAG version, counter, signature
 - **TypeScript Support** - Full TypeScript definitions included
 
-## What's New in v1.5.0
+## What's New in 1.8.0
+
+Crash and connection fixes on Android, coded errors on both platforms, correct NTAG helpers, iOS
+session and localization fixes, and new capabilities: NTAG password protection, NXP originality
+signature verification, ISO 15693 and MIFARE Classic helpers, NFC on/off events and background tag
+reading on Android. See the [CHANGELOG](CHANGELOG.md) for the full list and the behaviour changes.
+
+## What's New in v1.5.0 (advanced tag analysis)
 
 ### Advanced Tag Analysis Methods
 
@@ -40,7 +47,8 @@ New methods for premium NFC tag analysis:
 - ✅ Android (API 16+)
 - ✅ iOS 11+ (CoreNFC)
 
-> Note: Legacy platforms (Windows, BlackBerry) are no longer actively maintained but may still work.
+> Windows Phone 8, Windows and BlackBerry 10 were removed in 1.8.0. Android Beam (`share`, `handover`) no
+> longer exists on Android 10+ and fails with `NOT_SUPPORTED`.
 
 ## Contents
 
@@ -237,6 +245,72 @@ await nfc.close();
 
 ---
 
+## Password protection, originality, ISO 15693, MIFARE Classic (1.8.0)
+
+All Android-only (iOS can only transceive ISO 7816 APDUs), after `nfc.connect(tech)` on a scanned tag.
+Bytes can be given as a hex string, a byte array or a `Uint8Array`.
+
+```js
+await nfc.connect('android.nfc.tech.NfcA');
+
+// NTAG21x / Ultralight EV1 password (PWD_AUTH 0x1B). AUTH0 is written last, so protection starts only
+// once the password is in place; the other configuration bits are preserved.
+await nfc.ntagSetPassword('12345678', { pack: 'ABCD', startPage: 4, protectReads: false, authLimit: 0 });
+const { pack, packMatches } = await nfc.ntagAuthenticate('12345678', 'ABCD');   // AUTH_FAILED on a wrong password
+await nfc.ntagRemovePassword('12345678');
+const status = await nfc.getPasswordProtectionStatus();                        // AUTH0 / PROT for this IC
+
+// NXP originality signature: ECDSA on secp128r1 over the raw UID (NXP AN11350 / AN11341),
+// verified against NXP's NTAG21x and MIFARE Ultralight EV1 public keys. Needs BigInt.
+const { valid, keyName, uid } = await nfc.checkNtagOriginality();
+nfc.verifyNtagSignature(uid, signatureBytes);                                   // synchronous
+
+// ISO 15693 (NfcV)
+await nfc.connect('android.nfc.tech.NfcV');
+const info = await nfc.nfcvGetSystemInfo();              // uid, dsfid, afi, blockCount, blockSize, icReference
+const blocks = await nfc.nfcvReadBlocks(0, info.blockCount, info.uid);
+
+// MIFARE Classic (phones with an NXP NFC controller)
+await nfc.connect('android.nfc.tech.MifareClassic');
+await nfc.mifareClassicAuthenticate(1, 'FFFFFFFFFFFF', 'A');
+const block4 = await nfc.mifareClassicReadBlock(4);      // ArrayBuffer, 16 bytes
+
+// reader mode: time between presence checks
+nfc.readerMode(nfc.FLAG_READER_NFC_A, onTag, onError, { presenceCheckDelay: 250 });
+
+// NFC switched on/off (also while it is off), current state first
+nfc.addStateChangeListener(({ state, enabled }) => console.log(state, enabled));
+nfc.removeStateChangeListener();
+
+// Android 10+: opens the NFC settings panel over the app (falls back to the settings screen)
+nfc.showSettings();
+```
+
+A password is sent in plain text over the air and the originality signature can be copied to a clone,
+so treat both as deterrents, not strong security (see NXP AN13089).
+
+## Errors (1.8.0)
+
+Native errors carry a code. By default failure callbacks and rejections still receive the message string
+(as in 1.7.x); call `nfc.useErrorObjects(true)` once to receive `NfcError` objects instead:
+
+```js
+nfc.useErrorObjects(true);
+try {
+    await nfc.transceive('3000');
+} catch (e) {
+    if (e.code === 'TAG_LOST') { /* ask the user to hold the tag still */ }
+    if (e.code === nfc.IOS_ERROR.USER_CANCELED) { /* iOS sheet cancelled */ }
+}
+```
+
+Android codes: `TAG_LOST`, `TAG_STALE`, `IO_ERROR`, `FORMAT_ERROR`, `ILLEGAL_STATE`, `NO_TAG`, `NOT_CONNECTED`,
+`UNSUPPORTED_TECH`, `READ_ONLY`, `CAPACITY_EXCEEDED`, `NOT_NDEF`, `INVALID_ARGUMENT`, `NOT_SUPPORTED`,
+`AUTH_FAILED`, `NO_NFC`, `NFC_DISABLED`, `UNKNOWN`. iOS reader-session errors carry the numeric
+`NFCReaderError` code (`nfc.IOS_ERROR`), plugin-level iOS errors the same string codes as Android.
+
+---
+
 ## iOS Notes
 
 Reading NFC NDEF tags is supported on iPhone 7 (and newer) since iOS 11. iOS 13 added support for writing NDEF messages to NFC tags. iOS 13 also adds the ability to get the UID from some NFC tags. On iOS, the user must start a NFC session to scan for a tag. This is different from Android which can constantly scan for NFC tags. The [nfc.scanNdef](#nfcscanndef) and [nfc.scanTag](#nfcscantag) functions start a NFC scanning session. The NFC tag is returned to the caller via a Promise. If your existing code uses the deprecated [nfc.beginSession](#nfcbeginsession), update it to use `nfc.scanNdef`.
@@ -246,6 +320,38 @@ The `scanNdef` function uses [NFCNDEFReaderSession](https://developer.apple.com/
 You must call [nfc.scanNdef](#nfcscanndef) and [nfc.scanTag](#nfcscantag) before every scan. 
 
 Writing NFC tags on iOS uses the same [nfc.write](#nfcwrite) function as other platforms. Although it's the same function, the behavior is different on iOS. Calling `nfc.write` on an iOS device will start a new scanning session and write data to the scanned tag.
+
+### Localizing the iOS NFC sheet
+
+The texts the plugin shows on the iOS scan sheet (and the `message` of the matching errors) are looked
+up in the app's `Localizable.strings` first and fall back to English. To translate them, add these keys
+to `<language>.lproj/Localizable.strings` in the iOS app (for example with a Cordova `resource-file`
+or a hook):
+
+| Key | English default | Shown when |
+|-----|-----------------|------------|
+| `NFCHoldNearTag` | Hold near NFC tag to scan. | `scanNdef` / `scanTag` starts |
+| `NFCHoldNearWritableTag` | Hold near writable NFC tag to update. | `write` starts a session |
+| `NFCTagRead` | Tag successfully read. | a tag was read |
+| `NFCDataWrote` | Wrote data to NFC tag. | a write succeeded |
+| `NFCMoreThanOneTag` | More than 1 tag detected. Please remove all tags and try again. | several tags in the field |
+| `NFCErrorTagConnection` | Error connecting to tag. | connecting to the tag failed |
+| `NFCErrorTagStatus` | Error getting tag status. | reading the NDEF status failed |
+| `NFCDataReadFailed` | Read Failed. | reading the NDEF message failed |
+| `NFCNotNdefCompliant` | Tag is not NDEF compliant. | writing to a non-NDEF tag |
+| `NFCReadOnlyTag` | Tag is read only. | writing to a locked tag |
+| `NFCDataWriteFailed` | Write failed. | the write failed |
+| `NFCUnknownNdefTag` | Unknown NDEF tag status. | unexpected NDEF status |
+
+Example `he.lproj/Localizable.strings`:
+
+```
+"NFCHoldNearTag" = "קרבו את המכשיר לתג NFC כדי לסרוק.";
+"NFCTagRead" = "התג נקרא בהצלחה.";
+```
+
+Once the error texts are translated, match errors on their `code` (see `nfc.useErrorObjects`), not on the
+English message.
 
 # NFC
 
@@ -302,7 +408,6 @@ Function `nfc.addNdefListener` registers the callback for ndef events.
 
 A ndef event is fired when a NDEF tag is read.
 
-For BlackBerry 10, you must configure the type of tags your application will read with an [invoke-target in config.xml](#blackberry-10-invoke-target).
 
 On Android registered [mimeTypeListeners](#nfcaddmimetypelistener) takes precedence over this more generic NDEF listener.
 
@@ -312,11 +417,6 @@ On iOS you must call [beingSession](#nfcbeginsession) before scanning a tag.
 
 - Android
 - iOS
-- Windows
-- BlackBerry 7
-- BlackBerry 10
-- Windows Phone 8
-
 ## nfc.removeNdefListener
 
 Removes the previously registered event listener for NDEF tags added via `nfc.addNdefListener`.
@@ -335,9 +435,6 @@ Removing listeners is not recommended. Instead, consider that your callback can 
 
 - Android
 - iOS
-- Windows
-- BlackBerry 7
-
 ## nfc.addTagDiscoveredListener
 
 Registers an event listener for tags matching any tag type.
@@ -359,10 +456,6 @@ This event occurs when any tag is detected by the phone.
 ### Supported Platforms
 
 - Android
-- Windows
-- BlackBerry 7
-
-Note that Windows Phones need the newere NXP PN427 chipset to read non-NDEF tags. That tag will be read, but no tag meta-data is available.
 
 ## nfc.removeTagDiscoveredListener
 
@@ -381,9 +474,6 @@ Removing listeners is not recommended. Instead, consider that your callback can 
 ### Supported Platforms
 
 - Android
-- Windows
-- BlackBerry 7
-
 ## nfc.addMimeTypeListener
 
 Registers an event listener for NDEF tags matching a specified MIME type.
@@ -413,8 +503,6 @@ On Android, MIME types for filtering should always be lower case. (See [IntentFi
 ### Supported Platforms
 
 - Android
-- BlackBerry 7
-
 ## nfc.removeMimeTypeListener
 
 Removes the previously registered event listener added via `nfc.addMimeTypeListener`.
@@ -433,8 +521,6 @@ Removing listeners is not recommended. Instead, consider that your callback can 
 ### Supported Platforms
 
 - Android
-- BlackBerry 7
-
 ## nfc.addNdefFormatableListener
 
 Registers an event listener for formatable NDEF tags.
@@ -484,9 +570,7 @@ On **Android** this method *must* be called from within an NDEF Event Handler.
 
 On **iOS** this method can be called outside the NDEF Event Handler, it will start a new scanning session. Optionally you can reuse the read session to write data. See example below.
 
-On **Windows** this method *may* be called from within the NDEF Event Handler.
 
-On **Windows Phone 8.1** this method should be called outside the NDEF Event Handler, otherwise Windows tries to read the tag contents as you are writing to the tag.
 
 ### Examples
 
@@ -554,10 +638,6 @@ On iOS you can optionally write to NFC tag using the read session
 
 - Android
 - iOS
-- Windows
-- BlackBerry 7
-- Windows Phone 8
-
 ## nfc.makeReadOnly
 
 Makes a NFC tag read only.  **Warning this is permanent.**
@@ -628,16 +708,9 @@ Function `nfc.share` writes an NdefMessage via peer-to-peer.  This should appear
 ### Supported Platforms
 
 - Android
-- Windows
-- BlackBerry 7
-- BlackBerry 10
-- Windows Phone 8
-
 ### Platform differences
 
-    Android - shares message until unshare is called
-    Blackberry 10 - shares the message one time or until unshare is called
-    Windows Phone 8 - must be called from within a NFC event handler like nfc.write
+    Android Beam was removed in Android 10; since 1.8.0 this fails with NOT_SUPPORTED.
 
 ## nfc.unshare
 
@@ -657,10 +730,6 @@ Function `nfc.unshare` stops sharing data via peer-to-peer.
 ### Supported Platforms
 
 - Android
-- Windows
-- BlackBerry 7
-- BlackBerry 10
-
 ## nfc.erase
 
 Erase a NDEF tag
@@ -681,8 +750,6 @@ This method *must* be called from within an NDEF Event Handler.
 ### Supported Platforms
 
 - Android
-- BlackBerry 7
-
 ## nfc.handover
 
 Send a file to another device via NFC handover.
@@ -756,9 +823,6 @@ Function `showSettings` opens the NFC settings for the operating system.
 ### Supported Platforms
 
 - Android
-- Windows
-- BlackBerry 10
-
 ## nfc.enabled
 
 Check if NFC is available and enabled on this device.
@@ -780,14 +844,11 @@ The reason will be **NO_NFC** if the device doesn't support NFC and **NFC_DISABL
 
 Note: that on Android the NFC status is checked before every API call **NO_NFC** or **NFC_DISABLED** can be returned in **any** failure function.
 
-Windows will return **NO_NFC_OR_NFC_DISABLED** when NFC is not present or disabled. If the user disabled NFC after the application started, Windows may return **NFC_DISABLED**. Windows checks the NFC status before most API calls, but there are some cases when the NFC state can not be determined.
 
 ### Supported Platforms
 
 - Android
 - iOS
-- Windows
-
 ## nfc.beginSession
 
 **`beginSession` is deprecated. Use `scanNdef` or `scanTag`**
@@ -1259,11 +1320,7 @@ Events are fired when NFC tags are read.  Listeners are added by registering cal
 
 The tag contents are platform dependent.
 
-`id` and `techTypes` may be included when scanning a tag on Android.  `serialNumber` may be included on BlackBerry 7.
-
-`id` and `serialNumber` are different names for the same value.  `id` is typically displayed as a hex string `nfc.bytesToHexString(tag.id)`.
-
-Windows, Windows Phone 8, and BlackBerry 10 read the NDEF information from a tag, but do not have access to the tag id or other meta data like capacity, read-only status or tag technologies.
+`id` and `techTypes` are included when scanning a tag on Android; iOS includes `id` for tags scanned with `nfc.scanTag`. `id` is typically displayed as a hex string `nfc.bytesToHexString(tag.id)`.
 
 Assuming the following NDEF message is written to a tag, it will produce the following events when read.
 
@@ -1291,60 +1348,31 @@ Assuming the following NDEF message is written to a tag, it will produce the fol
         }
     }
 
-#### Sample Event on BlackBerry 7
-
-    {
-        type: 'ndef',
-        tag: {
-            "tagType": "4",
-            "isLocked": false,
-            "isLockable": false,
-            "freeSpaceSize": "2022",
-            "serialNumberLength": "7",
-            "serialNumber": [4, 96, 117, 74, -17, 34, -128],
-            "name": "Desfire EV1 2K",
-            "ndefMessage": [{
-                "tnf": 2,
-                "type": [116, 101, 120, 116, 47, 112, 103],
-                "id": [],
-                "payload": [72, 101, 108, 108, 111, 32, 80, 104, 111, 110, 101, 71, 97, 112]
-            }]
-        }
-    }
-
-#### Sample Event on Windows, BlackBerry 10, or Windows Phone 8
-
-    {
-        type: 'ndef',
-        tag: {
-            "ndefMessage": [{
-                "tnf": 2,
-                "type": [116, 101, 120, 116, 47, 112, 103],
-                "id": [],
-                "payload": [72, 101, 108, 108, 111, 32, 80, 104, 111, 110, 101, 71, 97, 112]
-            }]
-        }
-    }
-
 ## Getting Details about Events
 
-The raw contents of the scanned tags are written to the log before the event is fired.  Use `adb logcat` on Android and Event Log (hold alt + lglg) on BlackBerry.
+The raw contents of the scanned tags are written to the log before the event is fired.  Use `adb logcat` on Android and the Xcode console on iOS.
 
 You can also log the tag contents in your event handlers.  `console.log(JSON.stringify(nfcEvent.tag))`  Note that you want to stringify the tag not the event to avoid a circular reference.
 
 # Platform Differences
 
+The plugin supports Android and iOS (Windows Phone 8, Windows and BlackBerry 10 were removed in 1.8.0).
+
 ## Non-NDEF Tags
 
-Only Android and BlackBerry 7 can read data from non-NDEF NFC tags. Newer Windows Phones with NXP PN427 chipset can read non-NDEF tags, but can not get any tag meta data.
+Android reads data from non-NDEF tags (`addTagDiscoveredListener`, `connect` / `transceive`). On iOS,
+`nfc.scanTag` detects ISO 15693, FeliCa (with `pollFeliCa`) and MIFARE tags and returns their type and
+UID; raw commands are limited to ISO 7816 APDUs.
 
 ## Mifare Classic Tags
 
-BlackBerry 7, BlackBerry 10 and many newer Android phones will not read Mifare Classic tags.  Mifare Ultralight tags will work since they are NFC Forum Type 2 tags. Newer Windows 8.1 phones (Lumia 640) can read Mifare Classic tags.
+Only Android phones with an NXP NFC controller read MIFARE Classic tags (see `nfc.mifareClassicAuthenticate`).
+iOS has no MIFARE Classic API. MIFARE Ultralight tags work everywhere since they are NFC Forum Type 2 tags.
 
 ## Tag Id and Meta Data
 
-Windows Phone 8, BlackBerry 10, and Windows read the NDEF information from a tag, but do not have access to the tag id or other meta data like capacity, read-only status or tag technologies.
+Android returns the tag id, technologies, capacity and read-only status. iOS returns the id and type for
+tags scanned with `nfc.scanTag`, and the NDEF capacity (`maxSize`) and writability for NDEF tags.
 
 ## Multiple Listeners
 
@@ -1352,17 +1380,9 @@ Multiple listeners can be registered in JavaScript. e.g. addNdefListener, addTag
 
 On Android, only the most specific event will fire.  If a Mime Media Tag is scanned, only the addMimeTypeListener callback is called and not the callback defined in addNdefListener. You can use the same event handler for multiple listeners.
 
-For Windows, this plugin mimics the Android behavior. If an ndef event is fired, a tag event will not be fired. You should receive one event per tag.
-
-On BlackBerry 7, all the events fire if a Mime Media Tag is scanned.
-
 ## addTagDiscoveredListener
 
 On Android, addTagDiscoveredListener scans non-NDEF tags and NDEF tags. The tag event does NOT contain an ndefMessage even if there are NDEF messages on the tag.  Use addNdefListener or addMimeTypeListener to get the NDEF information.
-
-Windows can scan non-NDEF (unformatted) tags using addTagDiscoveredListener. The tag event will not include any data.
-
-On BlackBerry 7, addTagDiscoveredListener does NOT scan non-NDEF tags.  Webworks returns the ndefMessage in the event.
 
 ### Non-NDEF tag scanned with addTagDiscoveredListener on *Android*
 
@@ -1385,63 +1405,35 @@ On BlackBerry 7, addTagDiscoveredListener does NOT scan non-NDEF tags.  Webworks
         }
     }
 
-### Non-NDEF tag scanned with addTagDiscoveredListener on *Windows*
-
-    {
-        type: 'tag',
-        tag: {
-        }
-    }
-
-# BlackBerry 10 Invoke Target
-
-This plugin uses the [BlackBerry Invocation Framework](http://developer.blackberry.com/native/documentation/cascades/device_platform/invocation/receiving_invocation.html) to read NFC tags on BlackBerry 10. This means that you need to register an invoke target in the config.xml.
-
-If your project supports multiple platforms, copy www/config.xml to merges/config.xml and add a `rim:invoke-target` tag. The invoke-target determines which tags your app will scan when it is running. If your application is not running, BlackBerry will launch it when a matching tag is scanned.
-
-This sample configuration attempts to open any NDEF tag.
-
-    <rim:invoke-target id="your.unique.id.here">
-        <type>APPLICATION</type>
-        <filter>
-            <action>bb.action.OPEN</action>
-            <mime-type>application/vnd.rim.nfc.ndef</mime-type>
-            <!-- any TNF Empty(0), Well Known(1), MIME Media(2), Absolute URI(3), External(4) -->
-            <property var="uris" value="ndef://0,ndef://1,ndef://2,ndef://3,ndef://4" />
-        </filter>
-    </rim:invoke-target>
-
-You can configure you application to handle only certain tags.
-
-For example to scan only MIME Media tags of type "text/pg" use
-
-    <rim:invoke-target id="your.unique.id.here">
-        <type>APPLICATION</type>
-        <filter>
-            <action>bb.action.OPEN</action>
-            <mime-type>application/vnd.rim.nfc.ndef</mime-type>
-            <!-- TNF MIME Media(2) with type "text/pg" -->
-            <property var="uris" value="ndef://2/text/pg" />
-        </filter>
-    </rim:invoke-target>
-
-Or to scan only Plain Text tags use
-
-    <rim:invoke-target id="your.unique.id.here">
-        <type>APPLICATION</type>
-        <filter>
-            <action>bb.action.OPEN</action>
-            <mime-type>application/vnd.rim.nfc.ndef</mime-type>
-            <!-- TNF Well Known(1), RTD T -->
-            <property var="uris" value="ndef://1/T" />
-        </filter>
-    </rim:invoke-target>
-
-See the [BlackBerry documentation](http://developer.blackberry.com/native/documentation/cascades/device_comm/nfc/receiving_content.html) for more info.
-
 # Launching your Android Application when Scanning a Tag
 
-On Android, intents can be used to launch your application when a NFC tag is read.  This is optional and configured in AndroidManifest.xml.
+## Android: `NFC_INTENT_FILTERS` (1.8.0)
+
+Android can start (or bring forward) your app when a tag is tapped while the app is closed or in the
+background. Turn it on with a plugin variable; the plugin's `after_prepare` hook writes the intent
+filters onto the launcher activity and `res/xml/cdv_nfc_plugin_tech_filter.xml` for you (marked with the plugin's own label, so filters you wrote yourself are never touched):
+
+    cordova plugin add community-cordova-plugin-nfc --variable NFC_INTENT_FILTERS=ndef,tech
+
+| Value | What is added |
+|-------|---------------|
+| `none` (default) | nothing - behaviour of 1.7.x |
+| `ndef` | `NDEF_DISCOVERED` for each MIME type in `NFC_NDEF_MIME_TYPES` (default `*/*`; NFC Forum Text records count as `text/plain`) |
+| `tech` | `TECH_DISCOVERED` with a tech list matching any NFC technology (NfcA/B/F/V, IsoDep, Ndef, NdefFormatable, MifareClassic, MifareUltralight) |
+| `tag` | `TAG_DISCOVERED` (last-resort dispatch) |
+
+Combine them with commas. Changing the variable back to `none` and running `cordova prepare` removes
+everything the hook added. A URL tag keeps opening the browser: Android matches the browser's
+`NDEF_DISCOVERED` filter first, and `TECH_DISCOVERED` only applies when no app claimed the NDEF intent.
+
+The tag that launched the app is delivered through the normal listeners. It arrives right after
+`deviceready`, usually before your code has registered its listener, so the plugin keeps it for 30
+seconds and hands it to the first matching `nfc.addNdefListener` (NDEF tags, including ones matched by
+`ndef`), `nfc.addTagDiscoveredListener` (non-NDEF tags), `nfc.addMimeTypeListener` or
+`nfc.addNdefFormatableListener`. The event has `launch: true`.
+
+To write the filters by hand instead, add them to the activity in `config.xml` with
+`<edit-config>` / `<config-file>`, for example:
 
     <intent-filter>
       <action android:name="android.nfc.action.NDEF_DISCOVERED" />
@@ -1449,35 +1441,36 @@ On Android, intents can be used to launch your application when a NFC tag is rea
       <category android:name="android.intent.category.DEFAULT" />
     </intent-filter>
 
-Note: `data android:mimeType="text/pg"` should match the data type you specified in JavaScript
+See the Android documentation on [filtering for NFC intents](https://developer.android.com/develop/connectivity/nfc/nfc#ndef-disc).
 
-We have found it necessary to add `android:noHistory="true"` to the activity element so that scanning a tag launches the application after the user has pressed the home button.
+## iOS: background tag reading
 
-See the Android documentation for more information about [filtering for NFC intents](http://developer.android.com/guide/topics/connectivity/nfc/nfc.html#ndef-disc).
+iOS reads NDEF tags in the background by itself on iPhone XS and newer: a tag carrying a URL record
+for a domain your app handles as a **Universal Link** opens the app (or shows a notification) without
+any plugin involvement. To use it:
+
+1. Set up Universal Links for the domain (Associated Domains entitlement `applinks:example.com` and an
+   `apple-app-site-association` file) - for example with a deep-link plugin.
+2. Write the tag with `ndef.uriRecord("https://example.com/...")`.
+3. Handle the link in the app like any other Universal Link. The URL is the tag content; the raw NDEF
+   message is available natively as `NSUserActivity.ndefMessagePayload`, which this plugin does not read.
+
+Background reading is not possible while an NFC session is active, while Apple Pay / Wallet is in use,
+or before the first unlock after a restart. Non-URL records and non-NDEF tags can only be read in the
+foreground with `nfc.scanNdef` / `nfc.scanTag`.
 
 Testing
 =======
 
-Tests require the [Cordova Plugin Test Framework](https://github.com/apache/cordova-plugin-test-framework)
+    npm install
+    npm test            # eslint, typings type-test, Node unit tests, Android JVM harness (needs a JDK)
+    npm run test:ios    # macOS + Xcode: compiles NfcPlugin.m against the iPhoneOS SDK
 
-Create a new project
-
-    git clone https://github.com/chariotsolutions/phonegap-nfc
-    cordova create nfc-test com.example.nfc.test NfcTest
-    cd nfc-test
-    cordova platform add android
-    cordova plugin add ../phonegap-nfc
-    cordova plugin add ../phonegap-nfc/tests
-    cordova plugin add https://github.com/apache/cordova-plugin-test-framework.git
-
-Change the start page in `config.xml`
-
-    <content src="cdvtests/index.html" />
-
-Run the app on your phone
-
-    cordova run
-
+`tests/android` runs `NfcPlugin.java` on a plain JVM against fakes of the Android NFC classes that
+reproduce the framework rules the plugin depends on (one connected technology per tag, stale-tag
+`SecurityException`, `TagLostException`). `tests/unit` loads `www/phonegap-nfc.js` in Node with a fake
+Cordova bridge and a byte-accurate NTAG / Ultralight model. None of this replaces a test on a phone with
+real tags. The old `tests/` Cordova test-framework suite is kept for manual on-device runs.
 
 Sample Projects
 ================

@@ -22,8 +22,18 @@
 @property (nonatomic, assign) BOOL returnTagInCallback;
 @property (nonatomic, assign) BOOL returnTagInEvent;
 @property (nonatomic, assign) BOOL keepSessionOpen;
+// scanTag({pollFeliCa:true}): also poll ISO 18092 (FeliCa). Needs the app's
+// com.apple.developer.nfc.readersession.felica.systemcodes Info.plist entry, so it is opt-in.
+@property (nonatomic, assign) BOOL pollFeliCa;
 @property (strong, nonatomic) NFCReaderSession *nfcSession API_AVAILABLE(ios(11.0));
 @property (strong, nonatomic) NFCNDEFMessage *messageToWrite API_AVAILABLE(ios(11.0));
+// Sessions that were cancelled or replaced but have not delivered didInvalidate yet, mapped to the
+// callback id of the JS call that started them. Their late callbacks go to THAT call, never to
+// the scan that replaced them (fork #1 / upstream #493).
+@property (strong, nonatomic) NSMapTable *retiredSessionCallbacks;
+// A scan requested while the previous session was still live: it begins once that session has
+// invalidated (beginning earlier fails with "System resources unavailable").
+@property (strong, nonatomic) CDVInvokedUrlCommand *pendingScanCommand;
 @end
 
 @implementation NfcPlugin
@@ -34,6 +44,7 @@
     NSLog(@"(c) 2017-2020 Don Coleman");
 
     [super pluginInitialize];
+    self.retiredSessionCallbacks = [NSMapTable strongToStrongObjectsMapTable];
     
     if (@available(iOS 11, *)) {
         if (![NFCNDEFReaderSession readingAvailable]) {
@@ -71,9 +82,10 @@
     self.sendCallbackOnSessionStart = NO;
     self.returnTagInCallback = YES;
     self.returnTagInEvent = NO;
+    self.pollFeliCa = NO;
 
-    NSArray<NSDictionary *> *options = [command argumentAtIndex:0];
-    self.keepSessionOpen = [options valueForKey:@"keepSessionOpen"];
+    // boolValue: assigning the NSNumber itself made every non-nil value (including @NO) YES
+    self.keepSessionOpen = [self boolOption:@"keepSessionOpen" in:[command argumentAtIndex:0]];
 
     [self startScanSession:command];
 }
@@ -86,8 +98,8 @@
     self.returnTagInCallback = YES;
     self.returnTagInEvent = NO;
 
-    NSArray<NSDictionary *> *options = [command argumentAtIndex:0];
-    self.keepSessionOpen = [options valueForKey:@"keepSessionOpen"];
+    self.keepSessionOpen = [self boolOption:@"keepSessionOpen" in:[command argumentAtIndex:0]];
+    self.pollFeliCa = [self boolOption:@"pollFeliCa" in:[command argumentAtIndex:0]];
 
     [self startScanSession:command];
 }
@@ -109,7 +121,13 @@
             NSNumber *tnfNumber = [recordData objectForKey:@"tnf"];
             NFCTypeNameFormat tnf = (uint8_t)[tnfNumber intValue];
             NSData *type = [self uint8ArrayToNSData:[recordData objectForKey:@"type"]];
-            NSData *identifier = [self uint8ArrayToNSData:[recordData objectForKey:@"identifiers"]];
+            // records use `id` everywhere else (ndef.record, Android, what scans return); 1.7.1 read
+            // `identifiers` here, so ids were dropped on every iOS write / copy
+            id recordId = [recordData objectForKey:@"id"];
+            if (![recordId isKindOfClass:[NSArray class]]) {
+                recordId = [recordData objectForKey:@"identifiers"];
+            }
+            NSData *identifier = [recordId isKindOfClass:[NSArray class]] ? [self uint8ArrayToNSData:recordId] : [NSData data];
             NSData *payload  = [self uint8ArrayToNSData:[recordData objectForKey:@"payload"]];
             NFCNDEFPayload *record = [[NFCNDEFPayload alloc] initWithFormat:tnf type:type identifier:identifier payload:payload];
             [payloads addObject:record];
@@ -118,7 +136,7 @@
         NFCNDEFMessage *message = [[NFCNDEFMessage alloc] initWithNDEFRecords:payloads];
         self.messageToWrite = message;
     } @catch(NSException *e) {
-        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Invalid NDEF Message"];
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid NDEF Message"]];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
         return;
     }
@@ -135,7 +153,7 @@
 
         } else {
             NSLog(@"Using NFCTagReaderSession");
-            self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:nil invalidateAfterFirstRead:FALSE];
+            self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:dispatch_get_main_queue() invalidateAfterFirstRead:FALSE];
         }
     }
 
@@ -152,9 +170,10 @@
 
 - (void)cancelScan:(CDVInvokedUrlCommand*)command API_AVAILABLE(ios(11.0)){
     NSLog(@"cancelScan");
-    if (self.nfcSession) {
-        [self.nfcSession invalidateSession];
-    }
+    [self rejectPendingScan];
+    // The cancelled scan still gets its own "cancelled" rejection when didInvalidate arrives, but
+    // that late callback can no longer reach a scan started right after this one.
+    [self retireCurrentSession];
     connectedTag = NULL;
     connectedTagStatus = NFCNDEFStatusNotSupported;
     if (@available(iOS 13.0, *)) {
@@ -168,9 +187,7 @@
     NSLog(@"invalidateSession");
     NSLog(@"WARNING: invalidateSession is deprecated. Use cancelScan.");
     
-    if (_nfcSession) {
-        [_nfcSession invalidateSession];
-    }
+    [self retireCurrentSession];
     // Always return OK. Alternately could send status from the NFCNDEFReaderSessionDelegate
     CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -197,10 +214,10 @@
         if ([NFCNDEFReaderSession readingAvailable]) {
             pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
         } else {
-            pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"NO_NFC"];
+            pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NO_NFC" message:@"NO_NFC"]];
         }
     } else {
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"NO_NFC"];
+        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NO_NFC" message:@"NO_NFC"]];
     }
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
@@ -214,13 +231,13 @@
 
     if (@available(iOS 13.0, *)) {
         if (self.nfcSession == nil || !self.nfcSession.isReady) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"No active NFC session. Call nfc.scanTag({keepSessionOpen:true}) first."];
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_CONNECTED" message:@"No active NFC session. Call nfc.scanTag({keepSessionOpen:true}) first."]];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             return;
         }
 
         if (connectedISO7816Tag == nil) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"No ISO 7816 tag connected. Only ISO 7816-compatible tags support transceive on iOS."];
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_CONNECTED" message:@"No ISO 7816 tag connected. Only ISO 7816-compatible tags support transceive on iOS."]];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             return;
         }
@@ -236,14 +253,14 @@
         }
 
         if (apduData == nil || apduData.length < 4) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Invalid APDU: expected at least 4 bytes (CLA INS P1 P2)."];
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid APDU: expected at least 4 bytes (CLA INS P1 P2)."]];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             return;
         }
 
         NFCISO7816APDU *apdu = [[NFCISO7816APDU alloc] initWithData:apduData];
         if (apdu == nil) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Invalid APDU encoding."];
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid APDU encoding."]];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             return;
         }
@@ -253,7 +270,7 @@
         [connectedISO7816Tag sendCommandAPDU:apdu completionHandler:^(NSData * _Nonnull responseData, uint8_t sw1, uint8_t sw2, NSError * _Nullable error) {
             if (error) {
                 NSLog(@"transceive error: %@", error);
-                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:error.localizedDescription];
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorFromNSError:error]];
                 [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
                 return;
             }
@@ -267,7 +284,7 @@
             [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
         }];
     } else {
-        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"transceive requires iOS 13 or later."];
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_SUPPORTED" message:@"transceive requires iOS 13 or later."]];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     }
 }
@@ -277,6 +294,7 @@
 // iOS 11 & 12
 - (void) readerSession:(NFCNDEFReaderSession *)session didDetectNDEFs:(NSArray<NFCNDEFMessage *> *)messages API_AVAILABLE(ios(11.0)) {
     NSLog(@"NFCNDEFReaderSession didDetectNDEFs");
+    if ([self isStaleSession:session]) { return; }
     
     session.alertMessage = [self localizeString:@"NFCTagRead" defaultValue:@"Tag successfully read."];
     for (NFCNDEFMessage *message in messages) {
@@ -286,7 +304,8 @@
 
 // iOS 13
 - (void) readerSession:(NFCNDEFReaderSession *)session didDetectTags:(NSArray<__kindof id<NFCNDEFTag>> *)tags API_AVAILABLE(ios(13.0)) {
-    
+    if ([self isStaleSession:session]) { return; }
+
     if (tags.count > 1) {
         session.alertMessage = [self localizeString:@"NFCMoreThanOneTag" defaultValue:@"More than 1 tag detected. Please remove all tags and try again."];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
@@ -301,7 +320,7 @@
     [session connectToTag:tag completionHandler:^(NSError * _Nullable error) {
         if (error) {
             NSLog(@"%@", error);
-            [self closeSession:session withError:[self localizeString:@"NFCErrorTagConnection" defaultValue:@"Error connecting to tag."]];
+            [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCErrorTagConnection" defaultValue:@"Error connecting to tag."]];
             return;
         }
         
@@ -312,16 +331,12 @@
 
 - (void) readerSession:(NFCNDEFReaderSession *)session didInvalidateWithError:(NSError *)error API_AVAILABLE(ios(11.0)) {
     NSLog(@"readerSession ended");
-    if (error.code == NFCReaderSessionInvalidationErrorFirstNDEFTagRead) { // not an error
-        NSLog(@"Session ended after successful NDEF tag read");
-        return;
-    } else {
-        [self sendError:error.localizedDescription];
-    }
+    [self session:session didInvalidateWithError:error];
 }
 
 - (void) readerSessionDidBecomeActive:(nonnull NFCReaderSession *)session API_AVAILABLE(ios(11.0)) {
     NSLog(@"readerSessionDidBecomeActive");
+    if ([self isStaleSession:session]) { return; }
     [self sessionDidBecomeActive:session];
 }
 
@@ -329,11 +344,13 @@
 
 - (void)tagReaderSessionDidBecomeActive:(NFCTagReaderSession *)session API_AVAILABLE(ios(13.0)) {
     NSLog(@"tagReaderSessionDidBecomeActive");
+    if ([self isStaleSession:session]) { return; }
     [self sessionDidBecomeActive:session];
 }
 
 - (void)tagReaderSession:(NFCTagReaderSession *)session didDetectTags:(NSArray<__kindof id<NFCTag>> *)tags API_AVAILABLE(ios(13.0)) {
     NSLog(@"tagReaderSession didDetectTags");
+    if ([self isStaleSession:session]) { return; }
     
     if (tags.count > 1) {
         session.alertMessage = [self localizeString:@"NFCMoreThanOneTag" defaultValue:@"More than 1 tag detected. Please remove all tags and try again."];
@@ -351,7 +368,7 @@
     [session connectToTag:tag completionHandler:^(NSError * _Nullable error) {
         if (error) {
             NSLog(@"%@", error);
-            [self closeSession:session withError:[self localizeString:@"NFCErrorTagConnection" defaultValue:@"Error connecting to tag."]];
+            [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCErrorTagConnection" defaultValue:@"Error connecting to tag."]];
             return;
         }
 
@@ -372,14 +389,144 @@
 
 - (void)tagReaderSession:(NFCTagReaderSession *)session didInvalidateWithError:(NSError *)error API_AVAILABLE(ios(13.0)) {
     NSLog(@"tagReaderSession ended");
-    [self sendError:error.localizedDescription];
+    [self session:session didInvalidateWithError:error];
+}
+
+#pragma mark - Session lifecycle (1.8.0)
+
+// YES when a delegate callback comes from a session that is no longer self.nfcSession
+// (cancelled or replaced). Such callbacks must not touch the current scan.
+- (BOOL)isStaleSession:(NFCReaderSession *)session API_AVAILABLE(ios(11.0)) {
+    if (session != self.nfcSession) {
+        NSLog(@"Ignoring a callback from a stale NFC session");
+        return YES;
+    }
+    return NO;
+}
+
+// Detach the current session (and its JS callback) and invalidate it if it is still running.
+// Its didInvalidate is routed to its own callback via retiredSessionCallbacks.
+- (void)retireCurrentSession API_AVAILABLE(ios(11.0)) {
+    NFCReaderSession *old = self.nfcSession;
+    if (!old) {
+        return;
+    }
+    if (sessionCallbackId) {
+        [self.retiredSessionCallbacks setObject:sessionCallbackId forKey:old];
+    }
+    self.nfcSession = nil;
+    sessionCallbackId = NULL;
+    connectedTag = NULL;
+    connectedTagStatus = NFCNDEFStatusNotSupported;
+    if (@available(iOS 13.0, *)) {
+        connectedISO7816Tag = NULL;
+    }
+    if (old.isReady) {
+        [old invalidateSession];
+    } else {
+        // Already invalidated: no didInvalidate will come, nothing to wait for.
+        [self.retiredSessionCallbacks removeObjectForKey:old];
+    }
+}
+
+// Common didInvalidate handling for both session types.
+- (void)session:(NFCReaderSession *)session didInvalidateWithError:(NSError *)error API_AVAILABLE(ios(11.0)) {
+    BOOL firstReadDone = [session isKindOfClass:[NFCNDEFReaderSession class]] &&
+        error.code == NFCReaderSessionInvalidationErrorFirstNDEFTagRead;   // not an error
+
+    if (session == self.nfcSession) {
+        if (firstReadDone) {
+            NSLog(@"Session ended after successful NDEF tag read");
+        } else {
+            [self sendNSError:error];
+        }
+        self.nfcSession = nil;
+    } else {
+        NSString *retiredCallbackId = [self.retiredSessionCallbacks objectForKey:session];
+        [self.retiredSessionCallbacks removeObjectForKey:session];
+        if (retiredCallbackId.length > 0 && !firstReadDone) {
+            // the cancelled / replaced scan still learns how it ended - on its OWN callback
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorFromNSError:error]];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:retiredCallbackId];
+        }
+    }
+
+    [self beginPendingScanIfIdle];
+}
+
+// A scan that was parked (waiting for the previous session to invalidate) and is now cancelled or
+// superseded never began: answer it the way a cancelled session is answered, so its JS promise
+// settles instead of hanging.
+- (void)rejectPendingScan API_AVAILABLE(ios(11.0)) {
+    CDVInvokedUrlCommand *pending = self.pendingScanCommand;
+    self.pendingScanCommand = nil;
+    if (pending) {
+        NSDictionary *error = @{ @"code": @(NFCReaderSessionInvalidationErrorUserCanceled),
+                                 @"message": @"Session invalidated by user",
+                                 @"domain": NFCErrorDomain };
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:error];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:pending.callbackId];
+    }
+}
+
+- (void)beginPendingScanIfIdle API_AVAILABLE(ios(11.0)) {
+    CDVInvokedUrlCommand *pending = self.pendingScanCommand;
+    if (pending && (self.nfcSession == nil || !self.nfcSession.isReady) && self.retiredSessionCallbacks.count == 0) {
+        self.pendingScanCommand = nil;
+        [self beginScanSession:pending];
+    }
+}
+
+- (BOOL)boolOption:(NSString *)key in:(id)options {
+    if (![options isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    id value = [(NSDictionary *)options objectForKey:key];
+    if ([value respondsToSelector:@selector(boolValue)]) {
+        return [value boolValue];
+    }
+    return NO;
 }
 
 #pragma mark - Common NDEF Processing
 
 // Handles scanNdef, scanTag, and beginSession
 - (void)startScanSession:(CDVInvokedUrlCommand*)command {
-    
+    if (@available(iOS 11.0, *)) {
+        if (self.nfcSession && self.nfcSession.isReady) {
+            // A session is still live (e.g. a rescan right after cancel): invalidate it and begin the
+            // new one only after its didInvalidate, with a fallback in case that never arrives.
+            NSLog(@"Previous NFC session still active; starting the new scan after it invalidates");
+            [self rejectPendingScan];
+            self.pendingScanCommand = command;
+            [self retireCurrentSession];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+                if (self.pendingScanCommand == command) {
+                    NSLog(@"didInvalidate did not arrive in time; starting the pending scan");
+                    self.pendingScanCommand = nil;
+                    [self beginScanSession:command];
+                }
+            });
+            return;
+        }
+        if (self.retiredSessionCallbacks.count > 0) {
+            // a cancelled session is still shutting down
+            [self rejectPendingScan];
+            self.pendingScanCommand = command;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+                if (self.pendingScanCommand == command) {
+                    self.pendingScanCommand = nil;
+                    [self beginScanSession:command];
+                }
+            });
+            return;
+        }
+    }
+    [self beginScanSession:command];
+}
+
+- (void)beginScanSession:(CDVInvokedUrlCommand*)command {
+
     self.writeMode = NO;
     
     NSLog(@"shouldUseTagReaderSession %d", self.shouldUseTagReaderSession);
@@ -391,12 +538,16 @@
         
         if (self.shouldUseTagReaderSession) {
             NSLog(@"Using NFCTagReaderSession");
+            NFCPollingOption polling = NFCPollingISO14443 | NFCPollingISO15693;
+            if (self.pollFeliCa) {
+                polling |= NFCPollingISO18092;
+            }
             self.nfcSession = [[NFCTagReaderSession alloc]
-                           initWithPollingOption:(NFCPollingISO14443 | NFCPollingISO15693)
+                           initWithPollingOption:polling
                            delegate:self queue:dispatch_get_main_queue()];
         } else {
             NSLog(@"Using NFCNDEFReaderSession");
-            self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:nil invalidateAfterFirstRead:TRUE];
+            self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:dispatch_get_main_queue() invalidateAfterFirstRead:TRUE];
         }
         sessionCallbackId = [command.callbackId copy];
         self.nfcSession.alertMessage = [self localizeString:@"NFCHoldNearTag" defaultValue:@"Hold near NFC tag to scan."];
@@ -404,14 +555,14 @@
         
     } else if (@available(iOS 11.0, *)) {
         NSLog(@"iOS < 13, using NFCNDEFReaderSession");
-        self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:nil invalidateAfterFirstRead:TRUE];
+        self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:dispatch_get_main_queue() invalidateAfterFirstRead:TRUE];
         sessionCallbackId = [command.callbackId copy];
         self.nfcSession.alertMessage = [self localizeString:@"NFCHoldNearTag" defaultValue:@"Hold near NFC tag to scan."];
         [self.nfcSession beginSession];
     } else {
         NSLog(@"iOS < 11, no NFC support");
         CDVPluginResult *pluginResult;
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"NFC requires iOS 11"];
+        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NO_NFC" message:@"NFC requires iOS 11"]];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     }
         
@@ -424,9 +575,12 @@
 - (void)processNDEFTag: (NFCReaderSession *)session tag:(__kindof id<NFCNDEFTag>)tag metaData: (NSMutableDictionary * _Nonnull)metaData API_AVAILABLE(ios(13.0)) {
                             
     [tag queryNDEFStatusWithCompletionHandler:^(NFCNDEFStatus status, NSUInteger capacity, NSError * _Nullable error) {
+        if (!error && status != NFCNDEFStatusNotSupported) {
+            metaData[@"maxSize"] = @(capacity);   // same field as Android's Ndef.getMaxSize()
+        }
         if (error) {
             NSLog(@"%@", error);
-            [self closeSession:session withError:[self localizeString:@"NFCErrorTagStatus" defaultValue:@"Error getting tag status."]];
+            [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCErrorTagStatus" defaultValue:@"Error getting tag status."]];
             return;
         }
                 
@@ -464,7 +618,7 @@
         // Error Code=403 "NDEF tag does not contain any NDEF message" is not an error for this plugin
         if (error && error.code != 403) {
             NSLog(@"%@", error);
-            [self closeSession:session withError:[self localizeString:@"NFCDataReadFailed" defaultValue:@"Read Failed."]];
+            [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCDataReadFailed" defaultValue:@"Read Failed."]];
             return;
         } else {
             NSLog(@"%@", message);
@@ -480,17 +634,17 @@
 - (void)writeNDEFTag:(NFCReaderSession * _Nonnull)session status:(NFCNDEFStatus)status tag:(id<NFCNDEFTag>)tag  API_AVAILABLE(ios(13.0)){
     switch (status) {
         case NFCNDEFStatusNotSupported:
-            [self closeSession:session withError:[self localizeString:@"NFCNotNdefCompliant" defaultValue:@"Tag is not NDEF compliant."]];  // alternate message "Tag does not support NDEF."
+            [self closeSession:session withErrorCode:@"NOT_NDEF" message:[self localizeString:@"NFCNotNdefCompliant" defaultValue:@"Tag is not NDEF compliant."]];  // alternate message "Tag does not support NDEF."
             break;
         case NFCNDEFStatusReadOnly:
-            [self closeSession:session withError:[self localizeString:@"NFCReadOnlyTag" defaultValue:@"Tag is read only."]];
+            [self closeSession:session withErrorCode:@"READ_ONLY" message:[self localizeString:@"NFCReadOnlyTag" defaultValue:@"Tag is read only."]];
             break;
         case NFCNDEFStatusReadWrite: {
             
             [tag writeNDEF: self.messageToWrite completionHandler:^(NSError * _Nullable error) {
                 if (error) {
                     NSLog(@"%@", error);
-                    [self closeSession:session withError:[self localizeString:@"NFCDataWriteFailed" defaultValue:@"Write failed."]];
+                    [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCDataWriteFailed" defaultValue:@"Write failed."]];
                 } else {
                     session.alertMessage = [self localizeString:@"NFCDataWrote" defaultValue:@"Wrote data to NFC tag."];
                     CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
@@ -502,7 +656,7 @@
             
         }
         default:
-            [self closeSession:session withError:[self localizeString:@"NFCUnknownNdefTag" defaultValue:@"Unknown NDEF tag status."]];
+            [self closeSession:session withErrorCode:@"UNKNOWN" message:[self localizeString:@"NFCUnknownNdefTag" defaultValue:@"Unknown NDEF tag status."]];
     }
 }
 
@@ -517,14 +671,22 @@
     NSString *type;
     
     switch (tag.type) {
-        case NFCTagTypeFeliCa:
+        case NFCTagTypeFeliCa: {
             type = @"NFCTagTypeFeliCa";
-            uid = nil;
+            id<NFCFeliCaTag> felica = [tag asNFCFeliCaTag];
+            uid = felica.currentIDm;
+            if (felica.currentSystemCode) {
+                [tagInfo setValue:[self uint8ArrayFromNSData:felica.currentSystemCode] forKey:@"systemCode"];
+            }
             break;
-        case NFCTagTypeMiFare:
+        }
+        case NFCTagTypeMiFare: {
             type = @"NFCTagTypeMiFare";
-            uid = [[tag asNFCMiFareTag] identifier];
+            id<NFCMiFareTag> mifare = [tag asNFCMiFareTag];
+            uid = mifare.identifier;
+            [tagInfo setValue:[self mifareFamilyName:mifare.mifareFamily] forKey:@"mifareFamily"];
             break;
+        }
         case NFCTagTypeISO15693:
             type = @"NFCTagTypeISO15693";
             uid = [[tag asNFCISO15693Tag] identifier];
@@ -548,15 +710,44 @@
     return tagInfo;
 }
 
+- (NSString *) mifareFamilyName:(NFCMiFareFamily)family API_AVAILABLE(ios(13.0)) {
+    switch (family) {
+        case NFCMiFareUltralight: return @"Ultralight";
+        case NFCMiFarePlus: return @"Plus";
+        case NFCMiFareDESFire: return @"DESFire";
+        default: return @"Unknown";
+    }
+}
+
 #pragma mark - internal implementation
 
-- (void) sendError:(NSString *)message {
+// Errors reach JS as {code, message[, domain]}: CoreNFC NSErrors keep their numeric NFCReaderError
+// code (200 = user cancelled, 201 = timeout, 203 = system busy, ...); plugin errors use the same
+// string codes as Android. www/phonegap-nfc.js turns this back into the message string unless the
+// app called nfc.useErrorObjects(true).
+- (NSDictionary *) errorWithCode:(id)code message:(NSString *)message {
+    return @{ @"code": code ?: @"UNKNOWN", @"message": message ?: @"" };
+}
+
+- (NSDictionary *) errorFromNSError:(NSError *)error {
+    return @{
+        @"code": @(error.code),
+        @"message": error.localizedDescription ?: @"",
+        @"domain": error.domain ?: @""
+    };
+}
+
+- (void) sendErrorResult:(NSDictionary *)error {
     // only send the error if the callback id exists
     if (sessionCallbackId) {
-        NSLog(@"sendError: %@", message);
-        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:message];
+        NSLog(@"sendError: %@", error);
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:error];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:sessionCallbackId];
     }
+}
+
+- (void) sendNSError:(NSError *)error {
+    [self sendErrorResult:[self errorFromNSError:error]];
 }
 
 - (void) sessionDidBecomeActive:(NFCReaderSession *) session  API_AVAILABLE(ios(11.0)){
@@ -581,11 +772,23 @@
     if (@available(iOS 13.0, *)) {
         connectedISO7816Tag = NULL;
     }
+    [self markSessionClosing:session];
     [session invalidateSession];
 }
 
-- (void) closeSession:(NFCReaderSession *) session withError:(NSString *) errorMessage  API_AVAILABLE(ios(11.0)){
-    [self sendError:errorMessage];
+// A session this plugin is closing: a new scan waits for its didInvalidate, and that late
+// callback has no JS call to answer.
+- (void) markSessionClosing:(NFCReaderSession *) session API_AVAILABLE(ios(11.0)) {
+    if (session.isReady) {
+        [self.retiredSessionCallbacks setObject:@"" forKey:session];
+    }
+    if (session == self.nfcSession) {
+        self.nfcSession = nil;
+    }
+}
+
+- (void) closeSession:(NFCReaderSession *) session withErrorCode:(NSString *) code message:(NSString *) errorMessage  API_AVAILABLE(ios(11.0)){
+    [self sendErrorResult:[self errorWithCode:code message:errorMessage]];
 
     // kill the callback so Cordova doesn't get "Session invalidated by user"
     sessionCallbackId = NULL;
@@ -595,6 +798,7 @@
         connectedISO7816Tag = NULL;
     }
 
+    [self markSessionClosing:session];
     if (@available(iOS 13.0, *)) {
         [session invalidateSessionWithErrorMessage:errorMessage];
     } else {
@@ -710,8 +914,17 @@
     return jsonString;
 }
 
+// Sheet texts can be translated by the app: add the keys listed in the README ("Localizing the iOS
+// NFC sheet") to the app's <lang>.lproj/Localizable.strings. A missing key falls back to English.
 - (NSString*) localizeString:(NSString *)key defaultValue:(NSString*) defaultValue {
-    return NSLocalizedString(key, comment: "") != key ? NSLocalizedString(key, comment: "") : defaultValue;
+    NSString *localized = [[NSBundle mainBundle] localizedStringForKey:key value:nil table:nil];
+    // Foundation returns the key itself when there is no translation. Compare the text, not the
+    // pointer (1.7.1 used !=, which only worked because Foundation happened to hand back the
+    // same object).
+    if (localized.length == 0 || [localized isEqualToString:key]) {
+        return defaultValue;
+    }
+    return localized;
 }
 
 @end

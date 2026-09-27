@@ -8,3 +8,5 @@ Makefile
 *.iml
 .project
 out/
+node_modules/
+package-lock.json

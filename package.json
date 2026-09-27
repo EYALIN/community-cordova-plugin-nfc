@@ -1,9 +1,19 @@
 {
   "name": "community-cordova-plugin-nfc",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "Community Cordova NFC Plugin - Read and write NDEF messages, advanced tag analysis, raw memory access",
   "main": "./types/index.d.ts",
   "types": "./types/index.d.ts",
+  "files": [
+    "plugin.xml",
+    "www/",
+    "src/",
+    "scripts/",
+    "types/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE.txt"
+  ],
   "cordova": {
     "id": "community-cordova-plugin-nfc",
     "platforms": [
@@ -29,8 +39,12 @@
     "cordova-ios"
   ],
   "scripts": {
-    "test": "npm run lint",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:types": "tsc -p tests/types",
+    "test:unit": "node --test \"tests/unit/*.test.js\"",
+    "test:android": "bash tests/android/run.sh",
+    "test": "npm run lint && npm run test:types && npm run test:unit && npm run test:android",
+    "test:ios": "bash tests/ios/check-syntax.sh"
   },
   "author": "Don Coleman <don.coleman@gmail.com>",
   "contributors": [
@@ -38,6 +52,9 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "@cordova/eslint-config": "^3.0.0"
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^16.5.0",
+    "typescript": "^5.9.3"
   }
 }
