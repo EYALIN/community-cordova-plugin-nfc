@@ -141,3 +141,69 @@ test('[PLU-228] every sheet string key the plugin uses is documented in the READ
         assert.ok(readme.includes('`' + key + '` | ' + english + ' |'), 'README does not document ' + key + ' = ' + english);
     }
 });
+
+// ---- PLU-257: native erase()/makeReadOnly()
+test('[PLU-257] eraseTag:/makeReadOnly: refuse below iOS 13 with NOT_SUPPORTED, using if-available-else (negated @available is invalid ObjC)', () => {
+    for (const m of ['- (void)eraseTag:', '- (void)makeReadOnly:']) {
+        const body = methodBody(m);
+        assert.match(body, /if \(@available\(iOS 13\.0, \*\)\) \{/, m);
+        assert.match(body, /\} else \{/, m);
+        assert.match(body, /@"NOT_SUPPORTED"/, m);
+    }
+});
+
+test('[PLU-257] eraseTag: builds a single TNF_EMPTY NDEF record and writes it like writeTag:', () => {
+    const body = methodBody('- (void)eraseTag:(CDVInvokedUrlCommand*)command {');
+    assert.match(body, /NfcSessionModeErase/);
+    assert.match(body, /NFCTypeNameFormatEmpty/);
+    assert.match(body, /initWithNDEFRecords:@\[emptyRecord\]/);
+    assert.match(body, /eraseNDEFTag:self\.nfcSession status:connectedTagStatus tag:connectedTag/);
+});
+
+test('[PLU-257] eraseNDEFTag: fails READ_ONLY / NOT_SUPPORTED by NDEF status, and writes the empty message when writable', () => {
+    const body = methodBody('- (void)eraseNDEFTag:');
+    assert.match(body, /case NFCNDEFStatusNotSupported:[\s\S]*?@"NOT_SUPPORTED"/);
+    assert.match(body, /case NFCNDEFStatusReadOnly:[\s\S]*?@"READ_ONLY"/);
+    assert.match(body, /writeNDEF: self\.messageToWrite completionHandler:/);
+});
+
+test('[PLU-257] makeReadOnly: sets NfcSessionModeLock and reuses an open session via lockNDEFTag:', () => {
+    const body = methodBody('- (void)makeReadOnly:(CDVInvokedUrlCommand*)command {');
+    assert.match(body, /NfcSessionModeLock/);
+    assert.match(body, /lockNDEFTag:self\.nfcSession status:connectedTagStatus tag:connectedTag/);
+});
+
+test('[PLU-257] lockNDEFTag: treats an already-read-only tag as success (alreadyLocked:true) and locks via writeLockWithCompletionHandler: otherwise', () => {
+    const body = methodBody('- (void)lockNDEFTag:');
+    assert.match(body, /case NFCNDEFStatusReadOnly: \{[\s\S]*?@"alreadyLocked": @YES/);
+    assert.match(body, /respondsToSelector:@selector\(writeLockWithCompletionHandler:\)/);
+    assert.match(body, /@"NFCLockNotSupported"/);
+    assert.match(body, /writeLockWithCompletionHandler:\^\(NSError/);
+    assert.match(body, /@"alreadyLocked": @NO/);
+});
+
+test('[PLU-257] the session-mode dispatch in didDetectNDEFs/didDetectTag routes Erase/Lock to the new methods', () => {
+    assert.match(src, /case NfcSessionModeErase:\s*\[self eraseNDEFTag:session status:status tag:tag\];/);
+    assert.match(src, /case NfcSessionModeLock:\s*\[self lockNDEFTag:session status:status tag:tag\];/);
+});
+
+// ---- PLU-258: capabilities() and MIFARE transceive
+test('[PLU-258] capabilities: reports erase/makeReadOnly as iOS-13-gated and ntagPassword hardcoded false', () => {
+    const body = methodBody('- (void)capabilities:');
+    assert.match(body, /if \(@available\(iOS 13\.0, \*\)\) \{\s*ios13OrLater = YES;/);
+    assert.match(body, /@"erase": @\(ios13OrLater\)/);
+    assert.match(body, /@"makeReadOnly": @\(ios13OrLater\)/);
+    assert.match(body, /@"ntagPassword": @NO/);
+    assert.match(body, /@"platform": @"ios"/);
+});
+
+test('[PLU-258] transceive: dispatches to MIFARE via sendMiFareCommand, with a commented, explicitly-unverified NDEF-session fallback', () => {
+    const body = methodBody('- (void)transceive:');
+    assert.match(body, /id<NFCMiFareTag> mifareTag = connectedMiFareTag;/);
+    assert.match(body, /conformsToProtocol:@protocol\(NFCMiFareTag\)/);
+    assert.match(body, /sendMiFareCommand:apduData completionHandler:/);
+    // the MIFARE branch must not append sw1/sw2 the way the ISO7816 branch does
+    const mifareBranch = body.slice(body.indexOf('if (mifareTag != nil)'));
+    assert.doesNotMatch(mifareBranch.slice(0, mifareBranch.indexOf('sendMiFareCommand') + 400), /appendBytes:&sw1/);
+    assert.match(src, /Experiment \(PLU-258\)/, 'the NDEF-session MIFARE fallback must document that it is unverified');
+});

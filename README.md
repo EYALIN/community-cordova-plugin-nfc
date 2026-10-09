@@ -20,6 +20,13 @@ or if you're asking for new features or priority bug fixes. Thank you!
 - **Advanced Tag Analysis** (v1.5.0+) - Read raw memory, get NTAG version, counter, signature
 - **TypeScript Support** - Full TypeScript definitions included
 
+## What's New in 1.9.0
+
+iOS: `nfc.erase` and `nfc.makeReadOnly` now work (13+, PLU-257). `nfc.transceive` can also reach a
+MIFARE tag (PLU-258), the basis for the Android NTAG password helpers, though that path is not yet
+verified on real hardware. New `nfc.capabilities()` on every platform reports which of these are
+actually supported, instead of trying an operation and parsing the error.
+
 ## What's New in 1.8.0
 
 Crash and connection fixes on Android, coded errors on both platforms, correct NTAG helpers, iOS
@@ -247,7 +254,10 @@ await nfc.close();
 
 ## Password protection, originality, ISO 15693, MIFARE Classic (1.8.0)
 
-All Android-only (iOS can only transceive ISO 7816 APDUs), after `nfc.connect(tech)` on a scanned tag.
+All Android-only, after `nfc.connect(tech)` on a scanned tag. On iOS, `nfc.transceive` can reach
+a MIFARE tag via `NFCMiFareTag` (v1.9.0, PLU-258), which is what these helpers would need, but that
+path is unverified on real NTAG213/215 hardware - `nfc.capabilities().ntagPassword` reports `false`
+on iOS until it is proven, and these higher-level helpers themselves are not wired to iOS yet.
 Bytes can be given as a hex string, a byte array or a `Uint8Array`.
 
 ```js
@@ -342,6 +352,10 @@ or a hook):
 | `NFCReadOnlyTag` | Tag is read only. | writing to a locked tag |
 | `NFCDataWriteFailed` | Write failed. | the write failed |
 | `NFCUnknownNdefTag` | Unknown NDEF tag status. | unexpected NDEF status |
+| `NFCTagAlreadyReadOnly` | Tag is already read only. | `makeReadOnly` on an already-locked tag (v1.9.0) |
+| `NFCLockNotSupported` | This tag does not support being locked. | `makeReadOnly` on a tag whose hardware can't lock (v1.9.0) |
+| `NFCLockFailed` | Failed to lock tag. | the lock write failed (v1.9.0) |
+| `NFCTagLocked` | Tag is now read only. | a lock succeeded (v1.9.0) |
 
 Example `he.lproj/Localizable.strings`:
 
@@ -377,6 +391,7 @@ English message.
 - [nfc.scanNdef](#nfcscanndef)
 - [nfc.scanTag](#nfcscanTag)
 - [nfc.cancelScan](#nfccancelscan)
+- [nfc.capabilities](#nfccapabilities)
 
 ## ReaderMode
 
@@ -642,12 +657,14 @@ On iOS you can optionally write to NFC tag using the read session
 
 Makes a NFC tag read only.  **Warning this is permanent.**
 
-    nfc.makeReadOnly([onSuccess], [onFailure]);
+    nfc.makeReadOnly([onSuccess], [onFailure], [options]);
 
 ### Parameters
 
 - __onSuccess__: (Optional) The callback that is called when the tag is locked.
 - __onFailure__: (Optional) The callback that is called if there was an error.
+- __options__: (Optional, **iOS only**, v1.9.0) `{ alertMessage: "..." }` overrides the text shown
+  on the system NFC sheet while locking. Ignored on Android.
 
 ### Description
 
@@ -679,9 +696,22 @@ Example usage
 
     },
 
+On **iOS** (13+), call it after `nfc.scanNdef({keepSessionOpen: true})` or
+`nfc.scanTag({keepSessionOpen: true})` resolves - there is no NDEF event handler, so lock the tag
+from that resolved handler instead:
+
+    const tag = await nfc.scanNdef({ keepSessionOpen: true });
+    await nfc.makeReadOnly(null, null, { alertMessage: "Locking tag…" });
+
+A tag that is already read only resolves successfully (`{alreadyLocked: true}`) rather than
+failing. A tag whose hardware doesn't support locking fails with `NOT_SUPPORTED`. Below iOS 13,
+`makeReadOnly` always fails with `NOT_SUPPORTED`. Check `nfc.capabilities().makeReadOnly` to
+detect support ahead of time.
+
 ### Supported Platforms
 
 - Android
+- iOS 13+ (v1.9.0, PLU-257)
 
 ## nfc.share
 
@@ -734,22 +764,31 @@ Function `nfc.unshare` stops sharing data via peer-to-peer.
 
 Erase a NDEF tag
 
-    nfc.erase([onSuccess], [onFailure]);
+    nfc.erase([onSuccess], [onFailure], [options]);
 
 ### Parameters
 
 - __onSuccess__: (Optional) The callback that is called when sharing stops.
 - __onFailure__: (Optional) The callback that is called if there was an error.
+- __options__: (Optional, **iOS only**, v1.9.0) `{ alertMessage: "..." }` overrides the text shown
+  on the system NFC sheet while erasing. Ignored on Android.
 
 ### Description
 
 Function `nfc.erase` erases a tag by writing an empty message.  Will format unformatted tags before writing.
 
-This method *must* be called from within an NDEF Event Handler.
+On **Android** this method *must* be called from within an NDEF Event Handler.
+
+On **iOS** (13+), call it after `nfc.scanNdef({keepSessionOpen: true})` or
+`nfc.scanTag({keepSessionOpen: true})` resolves, the same way as `nfc.makeReadOnly` above. A
+read-only tag fails with `READ_ONLY`; a tag whose hardware doesn't support writing fails with
+`NOT_SUPPORTED`. Below iOS 13, `erase` always fails with `NOT_SUPPORTED`. Check
+`nfc.capabilities().erase` to detect support ahead of time.
 
 ### Supported Platforms
 
 - Android
+- iOS 13+ (v1.9.0, PLU-257)
 ## nfc.handover
 
 Send a file to another device via NFC handover.
@@ -1009,6 +1048,47 @@ Function `cancelScan` stops the [NFCReaderSession](https://developer.apple.com/d
 
 - iOS
 
+## nfc.capabilities
+
+Reports which optional NFC features this platform actually implements, so the app can decide
+what to offer instead of trying an operation and parsing the error. Added v1.9.0 (PLU-258).
+
+    nfc.capabilities([onSuccess], [onFailure]);
+
+### Parameters
+
+- __onSuccess__: (Optional) Called with `{erase, makeReadOnly, ntagPassword, platform}`.
+- __onFailure__: (Optional) The callback that is called if there was an error.
+
+### Returns
+
+ - Promise<{erase: boolean, makeReadOnly: boolean, ntagPassword: boolean, platform: string}> when
+   called without callbacks.
+
+### Description
+
+- `erase` / `makeReadOnly`: `true` on Android always, and on iOS from 13 onward; `false` on iOS
+  below 13 and on any other platform.
+- `ntagPassword`: whether `ntagAuthenticate` / `ntagSetPassword` / `ntagRemovePassword` (and the
+  underlying raw `transceive` they use) are expected to work. `true` on Android. **`false` on
+  iOS**, even on 13+ - the `NFCMiFareTag` raw-command path those helpers need (PLU-255/PLU-258)
+  hasn't been confirmed against a real NTAG213/215 yet. Re-check this value after that is proven
+  on device; it may become conditional on iOS version at that point.
+- `platform`: `cordova.platformId`.
+
+### Quick Example
+
+    const caps = await nfc.capabilities();
+    if (caps.makeReadOnly) {
+        showLockButton();
+    }
+
+### Supported Platforms
+
+- Android
+- iOS
+- any other platform (always reports every feature as unsupported)
+
 
 # Reader Mode Functions
 
@@ -1183,9 +1263,22 @@ Send raw command to the tag and receive the response.
 
 ### Description
 
-Function `transceive` sends raw commands to the tag and receives the response. `nfc.connect` must be called before calling `transceive`. Data passed to transceive can be a hex string representation of bytes or an ArrayBuffer. The response is returned as an ArrayBuffer in the promise. 
+Function `transceive` sends raw commands to the tag and receives the response. On **Android**, `nfc.connect` must be called before calling `transceive`. Data passed to transceive can be a hex string representation of bytes or an ArrayBuffer. The response is returned as an ArrayBuffer in the promise. 
 
 See Android's documentation [IsoDep.transceive()](https://developer.android.com/reference/android/nfc/tech/IsoDep.html#transceive(byte[])), [NfcV.transceive()](https://developer.android.com/reference/android/nfc/tech/NfcV.html#transceive(byte[])), [MifareUltralight.transceive()](https://developer.android.com/reference/android/nfc/tech/MifareUltralight.html#transceive(byte[])) for more info.
+
+On **iOS** (13+), there is no `connect` - call `transceive` after `nfc.scanTag({keepSessionOpen: true})`
+resolves. The tag is dispatched automatically:
+
+- An **ISO 7816** tag (since 1.7.0): the response has `sw1`/`sw2` appended, matching Android's
+  `IsoDep.transceive`.
+- A **MIFARE** tag (v1.9.0, PLU-258), via `NFCMiFareTag.sendMiFareCommand` - this is what
+  `ntagAuthenticate` / `ntagSetPassword` / `ntagRemovePassword` need on iOS. The response is the
+  raw bytes the tag sent back, with **no** `sw1`/`sw2` appended. As an experiment, this path is
+  also tried on the tag from an NDEF-session scan when it happens to conform to the MIFARE
+  protocol, since CoreNFC doesn't document whether that can occur; this fallback is **unverified
+  on real hardware**. Check `nfc.capabilities().ntagPassword` before relying on it - it is `false`
+  by default on iOS until proven.
 
 ### Parameters
 
@@ -1210,6 +1303,7 @@ See Android's documentation [IsoDep.transceive()](https://developer.android.com/
 ### Supported Platforms
 
 - Android
+- iOS 13+ (ISO 7816 since 1.7.0; MIFARE since v1.9.0, PLU-258)
 
 ## nfc.close
 

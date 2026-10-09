@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [1.9.0](https://github.com/EYALIN/community-cordova-plugin-nfc/compare/v1.8.0...v1.9.0) (2026-10-09)
+
+### Features
+
+* **iOS: `nfc.erase` and `nfc.makeReadOnly`** (PLU-257). Both were Android-only; on iOS 13+, call
+  them after `scanNdef`/`scanTag({keepSessionOpen: true})` resolves. `erase` writes an empty NDEF
+  record, failing with `READ_ONLY` or `NOT_SUPPORTED` as appropriate; `makeReadOnly` locks the tag
+  via `writeLockWithCompletionHandler:`, resolving `{alreadyLocked: true}` if the tag is already
+  locked and failing with `NOT_SUPPORTED` if the tag can't be locked. Both accept an optional
+  `{alertMessage}` on iOS. Below iOS 13, both fail with `NOT_SUPPORTED`.
+* **iOS: `nfc.transceive` reaches MIFARE tags** (PLU-258), via `NFCMiFareTag.sendMiFareCommand` -
+  the response has no `sw1`/`sw2` appended, unlike the existing ISO 7816 path. As an experiment,
+  the same MIFARE path is also tried on a tag from an NDEF-session scan when it happens to conform
+  to the MIFARE protocol; that fallback is unverified on real hardware.
+* **`nfc.capabilities()`** on every platform: `{erase, makeReadOnly, ntagPassword, platform}`.
+  `true`/`true` on Android; on iOS, `erase`/`makeReadOnly` are `true` from 13 onward. `ntagPassword`
+  is `true` on Android and **`false` on iOS** even on 13+ - the MIFARE `transceive` path those
+  helpers would need (PLU-255/PLU-258) is not yet confirmed against a real NTAG213/215.
+
 ## [1.8.0](https://github.com/EYALIN/community-cordova-plugin-nfc/compare/v1.7.1...v1.8.0) (2026-09-27)
 
 ### Fixes

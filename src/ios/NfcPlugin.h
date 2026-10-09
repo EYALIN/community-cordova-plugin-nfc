@@ -32,8 +32,16 @@
 - (void)enabled:(CDVInvokedUrlCommand *)command;
 - (void)writeTag:(CDVInvokedUrlCommand *)command;
 
-// ISO 7816 APDU exchange (added v1.7.0) - mirrors Android nfc.transceive
+// erase / makeReadOnly (added v1.9.0, PLU-257) - mirror Android nfc.erase / nfc.makeReadOnly
+- (void)eraseTag:(CDVInvokedUrlCommand *)command;
+- (void)makeReadOnly:(CDVInvokedUrlCommand *)command;
+
+// ISO 7816 APDU / MIFARE raw command exchange (v1.7.0, extended v1.9.0 for MIFARE - PLU-258) -
+// mirrors Android nfc.transceive
 - (void)transceive:(CDVInvokedUrlCommand *)command;
+
+// Feature detection (added v1.9.0, PLU-258)
+- (void)capabilities:(CDVInvokedUrlCommand *)command;
 
 // Internal implementation
 - (void)channel:(CDVInvokedUrlCommand *)command;

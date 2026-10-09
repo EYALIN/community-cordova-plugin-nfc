@@ -7,6 +7,15 @@
 #import "NfcPlugin.h"
 #import <CoreNFC/CoreNFC.h>
 
+// What the current/next NDEF session is for. Replaces overloading self.messageToWrite (e.g. using
+// its presence/content as a signal) to tell a read apart from a write/erase/lock - PLU-257.
+typedef NS_ENUM(NSInteger, NfcSessionMode) {
+    NfcSessionModeRead = 0,
+    NfcSessionModeWrite,
+    NfcSessionModeErase,
+    NfcSessionModeLock
+};
+
 @interface NfcPlugin() {
     NSString* sessionCallbackId;
     NSString* channelCallbackId;
@@ -15,8 +24,11 @@
     // Held when an ISO 7816 tag is connected and keepSessionOpen=YES so that
     // subsequent JS calls to nfc.transceive() can exchange APDUs. (v1.7.0)
     id<NFCISO7816Tag> connectedISO7816Tag API_AVAILABLE(ios(13.0));
+    // Held when a MIFARE/NTAG tag is connected and keepSessionOpen=YES so that nfc.transceive()
+    // can send raw MIFARE commands (NTAG password helpers, GET_VERSION, ...) - PLU-258.
+    id<NFCMiFareTag> connectedMiFareTag API_AVAILABLE(ios(13.0));
 }
-@property (nonatomic, assign) BOOL writeMode;
+@property (nonatomic, assign) NfcSessionMode sessionMode;
 @property (nonatomic, assign) BOOL shouldUseTagReaderSession;
 @property (nonatomic, assign) BOOL sendCallbackOnSessionStart;
 @property (nonatomic, assign) BOOL returnTagInCallback;
@@ -106,8 +118,8 @@
 
 - (void)writeTag:(CDVInvokedUrlCommand*)command API_AVAILABLE(ios(13.0)){
     NSLog(@"writeTag");
-    
-    self.writeMode = YES;
+
+    self.sessionMode = NfcSessionModeWrite;
     self.shouldUseTagReaderSession = NO;
     BOOL reusingSession = NO;
     
@@ -168,6 +180,88 @@
     }
 }
 
+// nfc.erase() on iOS (PLU-257): writes a single TNF_EMPTY record, same as Android's eraseTag -
+// see com.chariotsolutions.nfc.plugin.NfcPlugin#eraseTag. Mirrors writeTag:'s session reuse.
+- (void)eraseTag:(CDVInvokedUrlCommand*)command {
+    NSLog(@"eraseTag");
+
+    if (@available(iOS 13.0, *)) {
+        // continues below
+    } else {
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_SUPPORTED" message:@"erase requires iOS 13 or later."]];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        return;
+    }
+
+    self.sessionMode = NfcSessionModeErase;
+    self.shouldUseTagReaderSession = NO;
+    BOOL reusingSession = NO;
+
+    NFCNDEFPayload *emptyRecord = [[NFCNDEFPayload alloc] initWithFormat:NFCTypeNameFormatEmpty type:[NSData data] identifier:[NSData data] payload:[NSData data]];
+    self.messageToWrite = [[NFCNDEFMessage alloc] initWithNDEFRecords:@[emptyRecord]];
+
+    NSDictionary *options = [command argumentAtIndex:0];
+
+    if (self.nfcSession && self.nfcSession.isReady) {
+        reusingSession = YES;
+    } else {
+        self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:dispatch_get_main_queue() invalidateAfterFirstRead:FALSE];
+    }
+
+    NSString *alertMessage = [options isKindOfClass:[NSDictionary class]] ? [options objectForKey:@"alertMessage"] : nil;
+    self.nfcSession.alertMessage = ([alertMessage isKindOfClass:[NSString class]] && alertMessage.length > 0)
+        ? alertMessage
+        : [self localizeString:@"NFCHoldNearWritableTag" defaultValue:@"Hold near writable NFC tag to update."];
+    sessionCallbackId = [command.callbackId copy];
+
+    if (reusingSession) {
+        self.keepSessionOpen = NO;
+        [self eraseNDEFTag:self.nfcSession status:connectedTagStatus tag:connectedTag];
+    } else {
+        [self.nfcSession beginSession];
+    }
+}
+
+// nfc.makeReadOnly() on iOS (PLU-257): permanently locks the tag via NFCNDEFTag.writeLock
+// (iOS 13+). Already-read-only counts as success, same as Android returning without error when
+// the tag is already locked.
+- (void)makeReadOnly:(CDVInvokedUrlCommand*)command {
+    NSLog(@"makeReadOnly");
+
+    if (@available(iOS 13.0, *)) {
+        // continues below
+    } else {
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_SUPPORTED" message:@"makeReadOnly requires iOS 13 or later."]];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        return;
+    }
+
+    self.sessionMode = NfcSessionModeLock;
+    self.shouldUseTagReaderSession = NO;
+    BOOL reusingSession = NO;
+
+    NSDictionary *options = [command argumentAtIndex:0];
+
+    if (self.nfcSession && self.nfcSession.isReady) {
+        reusingSession = YES;
+    } else {
+        self.nfcSession = [[NFCNDEFReaderSession alloc]initWithDelegate:self queue:dispatch_get_main_queue() invalidateAfterFirstRead:FALSE];
+    }
+
+    NSString *alertMessage = [options isKindOfClass:[NSDictionary class]] ? [options objectForKey:@"alertMessage"] : nil;
+    self.nfcSession.alertMessage = ([alertMessage isKindOfClass:[NSString class]] && alertMessage.length > 0)
+        ? alertMessage
+        : [self localizeString:@"NFCHoldNearWritableTag" defaultValue:@"Hold near writable NFC tag to update."];
+    sessionCallbackId = [command.callbackId copy];
+
+    if (reusingSession) {
+        self.keepSessionOpen = NO;
+        [self lockNDEFTag:self.nfcSession status:connectedTagStatus tag:connectedTag];
+    } else {
+        [self.nfcSession beginSession];
+    }
+}
+
 - (void)cancelScan:(CDVInvokedUrlCommand*)command API_AVAILABLE(ios(11.0)){
     NSLog(@"cancelScan");
     [self rejectPendingScan];
@@ -178,8 +272,32 @@
     connectedTagStatus = NFCNDEFStatusNotSupported;
     if (@available(iOS 13.0, *)) {
         connectedISO7816Tag = NULL;
+        connectedMiFareTag = NULL;
     }
     CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+}
+
+// nfc.capabilities() (PLU-258): lets an app feature-detect before calling erase/makeReadOnly/the
+// NTAG password helpers instead of trying and parsing the error.
+- (void)capabilities:(CDVInvokedUrlCommand *)command {
+    NSLog(@"capabilities");
+    BOOL ios13OrLater = NO;
+    if (@available(iOS 13.0, *)) {
+        ios13OrLater = YES;
+    }
+    NSDictionary *result = @{
+        @"erase": @(ios13OrLater),
+        @"makeReadOnly": @(ios13OrLater),
+        // PLU-255: scanTag's NFCTagReaderSession never delivered didDetectTags on the owner's
+        // iPhone 17 Pro / iOS 26, so raw MIFARE transceive (rawTransceive, the NTAG password
+        // helpers) is unproven on iOS. Keep this false until a real device confirms the tag-reader
+        // path (or the NDEF-session experiment in -transceive:) actually delivers a MIFARE tag,
+        // then flip it to ios13OrLater here.
+        @"ntagPassword": @NO,
+        @"platform": @"ios"
+    };
+    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:result];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
@@ -226,18 +344,17 @@
 // Requires an ISO 7816-compatible tag detected via scanTag({keepSessionOpen:true}).
 // Resolves with an ArrayBuffer containing the APDU response data with sw1/sw2
 // appended (Android IsoDep semantics).
+//
+// PLU-258: also supports a MIFARE/NTAG tag via NFCMiFareTag.sendMiFareCommand, which is what the
+// www rawTransceive/rawAuthenticate/rawSetPassword NTAG password helpers need. Unlike the ISO 7816
+// branch, the raw response has no sw1/sw2 appended - it is exactly what the tag sent back, matching
+// Android's raw NTAG command responses.
 - (void)transceive:(CDVInvokedUrlCommand *)command {
     NSLog(@"transceive");
 
     if (@available(iOS 13.0, *)) {
         if (self.nfcSession == nil || !self.nfcSession.isReady) {
             CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_CONNECTED" message:@"No active NFC session. Call nfc.scanTag({keepSessionOpen:true}) first."]];
-            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-            return;
-        }
-
-        if (connectedISO7816Tag == nil) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_CONNECTED" message:@"No ISO 7816 tag connected. Only ISO 7816-compatible tags support transceive on iOS."]];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             return;
         }
@@ -252,37 +369,75 @@
             apduData = [self uint8ArrayToNSData:(NSArray *)arg];
         }
 
-        if (apduData == nil || apduData.length < 4) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid APDU: expected at least 4 bytes (CLA INS P1 P2)."]];
-            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-            return;
-        }
-
-        NFCISO7816APDU *apdu = [[NFCISO7816APDU alloc] initWithData:apduData];
-        if (apdu == nil) {
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid APDU encoding."]];
-            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-            return;
-        }
-
         NSString *callbackId = [command.callbackId copy];
 
-        [connectedISO7816Tag sendCommandAPDU:apdu completionHandler:^(NSData * _Nonnull responseData, uint8_t sw1, uint8_t sw2, NSError * _Nullable error) {
-            if (error) {
-                NSLog(@"transceive error: %@", error);
-                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorFromNSError:error]];
-                [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+        if (connectedISO7816Tag != nil) {
+            if (apduData == nil || apduData.length < 4) {
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid APDU: expected at least 4 bytes (CLA INS P1 P2)."]];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
                 return;
             }
 
-            // Match Android IsoDep.transceive: response data with sw1/sw2 appended.
-            NSMutableData *full = [NSMutableData dataWithData:responseData ?: [NSData data]];
-            [full appendBytes:&sw1 length:1];
-            [full appendBytes:&sw2 length:1];
+            NFCISO7816APDU *apdu = [[NFCISO7816APDU alloc] initWithData:apduData];
+            if (apdu == nil) {
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid APDU encoding."]];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+                return;
+            }
 
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArrayBuffer:full];
-            [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
-        }];
+            [connectedISO7816Tag sendCommandAPDU:apdu completionHandler:^(NSData * _Nonnull responseData, uint8_t sw1, uint8_t sw2, NSError * _Nullable error) {
+                if (error) {
+                    NSLog(@"transceive error: %@", error);
+                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorFromNSError:error]];
+                    [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+                    return;
+                }
+
+                // Match Android IsoDep.transceive: response data with sw1/sw2 appended.
+                NSMutableData *full = [NSMutableData dataWithData:responseData ?: [NSData data]];
+                [full appendBytes:&sw1 length:1];
+                [full appendBytes:&sw2 length:1];
+
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArrayBuffer:full];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+            }];
+            return;
+        }
+
+        id<NFCMiFareTag> mifareTag = connectedMiFareTag;
+        if (mifareTag == nil && self->connectedTag != nil && [self->connectedTag conformsToProtocol:@protocol(NFCMiFareTag)]) {
+            // Experiment (PLU-258): CoreNFC doesn't document the NDEF-session tag (from
+            // scanNdef/scanTag without the ISO7816 branch below) as also conforming to
+            // NFCMiFareTag, but a concrete tag can implement more than one CoreNFC protocol at
+            // once, so this runtime check is free to try and may let rawTransceive work on a tag
+            // read via scanNdef({keepSessionOpen:true}) even when the dedicated tag-reader-session
+            // path (PLU-255) doesn't fire. Unverified on a real device.
+            mifareTag = (id<NFCMiFareTag>)self->connectedTag;
+        }
+
+        if (mifareTag != nil) {
+            if (apduData == nil || apduData.length == 0) {
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"INVALID_ARGUMENT" message:@"Invalid MIFARE command: expected at least 1 byte."]];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+                return;
+            }
+
+            [mifareTag sendMiFareCommand:apduData completionHandler:^(NSData * _Nonnull responseData, NSError * _Nullable error) {
+                if (error) {
+                    NSLog(@"transceive (MIFARE) error: %@", error);
+                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorFromNSError:error]];
+                    [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+                    return;
+                }
+
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArrayBuffer:responseData ?: [NSData data]];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:callbackId];
+            }];
+            return;
+        }
+
+        CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_CONNECTED" message:@"No ISO 7816 or MIFARE tag connected. Only ISO 7816-compatible and MIFARE/NTAG tags support transceive on iOS."]];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     } else {
         CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self errorWithCode:@"NOT_SUPPORTED" message:@"transceive requires iOS 13 or later."]];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -383,6 +538,15 @@
             return;
         }
 
+        // MIFARE/NTAG + keepSessionOpen (PLU-258): hold the tag for nfc.transceive() raw MIFARE
+        // commands (the NTAG password helpers), same shape as the ISO 7816 branch above.
+        if (tag.type == NFCTagTypeMiFare && self.keepSessionOpen) {
+            self->connectedMiFareTag = [tag asNFCMiFareTag];
+            session.alertMessage = [self localizeString:@"NFCTagRead" defaultValue:@"Tag successfully read."];
+            [self fireTagEvent:tagMetaData];
+            return;
+        }
+
         [self processNDEFTag:session tag:ndefTag metaData:tagMetaData];
     }];
 }
@@ -420,6 +584,7 @@
     connectedTagStatus = NFCNDEFStatusNotSupported;
     if (@available(iOS 13.0, *)) {
         connectedISO7816Tag = NULL;
+        connectedMiFareTag = NULL;
     }
     if (old.isReady) {
         [old invalidateSession];
@@ -527,8 +692,8 @@
 
 - (void)beginScanSession:(CDVInvokedUrlCommand*)command {
 
-    self.writeMode = NO;
-    
+    self.sessionMode = NfcSessionModeRead;
+
     NSLog(@"shouldUseTagReaderSession %d", self.shouldUseTagReaderSession);
     NSLog(@"callbackOnSessionStart %d", self.sendCallbackOnSessionStart);
     NSLog(@"returnTagInCallback %d", self.returnTagInCallback);
@@ -584,15 +749,25 @@
             return;
         }
                 
-        if (self.writeMode) {
-            [self writeNDEFTag:session status:status tag:tag];
-        } else {
-            // save tag & status so we can re-use in write
-            if (self.keepSessionOpen) {
-                self->connectedTagStatus = status;
-                self->connectedTag = tag;
-            }
-            [self readNDEFTag:session status:status tag:tag metaData:metaData];
+        switch (self.sessionMode) {
+            case NfcSessionModeWrite:
+                [self writeNDEFTag:session status:status tag:tag];
+                break;
+            case NfcSessionModeErase:
+                [self eraseNDEFTag:session status:status tag:tag];
+                break;
+            case NfcSessionModeLock:
+                [self lockNDEFTag:session status:status tag:tag];
+                break;
+            case NfcSessionModeRead:
+            default:
+                // save tag & status so we can re-use in write
+                if (self.keepSessionOpen) {
+                    self->connectedTagStatus = status;
+                    self->connectedTag = tag;
+                }
+                [self readNDEFTag:session status:status tag:tag metaData:metaData];
+                break;
         }
 
     }];
@@ -654,6 +829,79 @@
             }];
             break;
             
+        }
+        default:
+            [self closeSession:session withErrorCode:@"UNKNOWN" message:[self localizeString:@"NFCUnknownNdefTag" defaultValue:@"Unknown NDEF tag status."]];
+    }
+}
+
+// nfc.erase() (PLU-257): same write path as writeNDEFTag, but self.messageToWrite is the single
+// TNF_EMPTY record built in -eraseTag:, and NOT_SUPPORTED (not NOT_NDEF) covers a tag that
+// doesn't support NDEF at all - matching Android's eraseTag error code.
+- (void)eraseNDEFTag:(NFCReaderSession * _Nonnull)session status:(NFCNDEFStatus)status tag:(id<NFCNDEFTag>)tag API_AVAILABLE(ios(13.0)) {
+    switch (status) {
+        case NFCNDEFStatusNotSupported:
+            [self closeSession:session withErrorCode:@"NOT_SUPPORTED" message:[self localizeString:@"NFCNotNdefCompliant" defaultValue:@"Tag is not NDEF compliant."]];
+            break;
+        case NFCNDEFStatusReadOnly:
+            [self closeSession:session withErrorCode:@"READ_ONLY" message:[self localizeString:@"NFCReadOnlyTag" defaultValue:@"Tag is read only."]];
+            break;
+        case NFCNDEFStatusReadWrite: {
+
+            [tag writeNDEF: self.messageToWrite completionHandler:^(NSError * _Nullable error) {
+                if (error) {
+                    NSLog(@"%@", error);
+                    [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCDataWriteFailed" defaultValue:@"Write failed."]];
+                } else {
+                    session.alertMessage = [self localizeString:@"NFCDataWrote" defaultValue:@"Wrote data to NFC tag."];
+                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+                    [self.commandDelegate sendPluginResult:pluginResult callbackId:self->sessionCallbackId];
+                    [self closeSession:session];
+                }
+            }];
+            break;
+
+        }
+        default:
+            [self closeSession:session withErrorCode:@"UNKNOWN" message:[self localizeString:@"NFCUnknownNdefTag" defaultValue:@"Unknown NDEF tag status."]];
+    }
+}
+
+// nfc.makeReadOnly() (PLU-257): NFCNDEFTag.writeLockWithCompletionHandler (iOS 13+) permanently
+// locks the tag. A tag that is already read-only is reported as success with alreadyLocked:true,
+// same as Android returning without error when the tag can't be locked again.
+- (void)lockNDEFTag:(NFCReaderSession * _Nonnull)session status:(NFCNDEFStatus)status tag:(id<NFCNDEFTag>)tag API_AVAILABLE(ios(13.0)) {
+    switch (status) {
+        case NFCNDEFStatusNotSupported:
+            [self closeSession:session withErrorCode:@"NOT_SUPPORTED" message:[self localizeString:@"NFCNotNdefCompliant" defaultValue:@"Tag is not NDEF compliant."]];
+            break;
+        case NFCNDEFStatusReadOnly: {
+            session.alertMessage = [self localizeString:@"NFCTagAlreadyReadOnly" defaultValue:@"Tag is already read only."];
+            NSDictionary *result = @{ @"alreadyLocked": @YES };
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:result];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:self->sessionCallbackId];
+            [self closeSession:session];
+            break;
+        }
+        case NFCNDEFStatusReadWrite: {
+            if (![tag respondsToSelector:@selector(writeLockWithCompletionHandler:)]) {
+                [self closeSession:session withErrorCode:@"NOT_SUPPORTED" message:[self localizeString:@"NFCLockNotSupported" defaultValue:@"This tag does not support being locked."]];
+                break;
+            }
+
+            [tag writeLockWithCompletionHandler:^(NSError * _Nullable error) {
+                if (error) {
+                    NSLog(@"%@", error);
+                    [self closeSession:session withErrorCode:@"IO_ERROR" message:[self localizeString:@"NFCLockFailed" defaultValue:@"Failed to lock tag."]];
+                } else {
+                    session.alertMessage = [self localizeString:@"NFCTagLocked" defaultValue:@"Tag is now read only."];
+                    NSDictionary *result = @{ @"alreadyLocked": @NO };
+                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:result];
+                    [self.commandDelegate sendPluginResult:pluginResult callbackId:self->sessionCallbackId];
+                    [self closeSession:session];
+                }
+            }];
+            break;
         }
         default:
             [self closeSession:session withErrorCode:@"UNKNOWN" message:[self localizeString:@"NFCUnknownNdefTag" defaultValue:@"Unknown NDEF tag status."]];
@@ -771,6 +1019,7 @@
     connectedTagStatus = NFCNDEFStatusNotSupported;
     if (@available(iOS 13.0, *)) {
         connectedISO7816Tag = NULL;
+        connectedMiFareTag = NULL;
     }
     [self markSessionClosing:session];
     [session invalidateSession];
@@ -796,6 +1045,7 @@
     connectedTagStatus = NFCNDEFStatusNotSupported;
     if (@available(iOS 13.0, *)) {
         connectedISO7816Tag = NULL;
+        connectedMiFareTag = NULL;
     }
 
     [self markSessionClosing:session];

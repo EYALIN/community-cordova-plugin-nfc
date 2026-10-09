@@ -170,6 +170,20 @@ function execOrPromise(win, fail, action, args) {
     nfcExec(win, fail, action, args);
 }
 
+// Same callback-or-Promise duality as execOrPromise(), but for an API that answers from a plain
+// JS value instead of a native exec call (capabilities() on Android / unsupported platforms).
+function resolveOrCall(win, fail, value) {
+    if (typeof win === 'function') {
+        win(value);
+        return undefined;
+    }
+    // [PLU-257 round-1] No success callback was given (win is not a function) - whether or not a
+    // `fail` was passed, there is no failure channel for a synthesized answer like this one, so a
+    // fail-only call (win undefined, fail a function) must still behave like execOrPromise and
+    // hand back a Promise rather than silently dropping `value`.
+    return Promise.resolve(value);
+}
+
 var ndef = {
 
     // see android.nfc.NdefRecord for documentation about constants
@@ -595,7 +609,10 @@ var nfc = {
         return execOrPromise(win, fail, "writeTag", [ndefMessage]);
     },
 
-    makeReadOnly: function (win, fail) {
+    makeReadOnly: function (win, fail, options) {
+        if (cordova.platformId === "ios") {
+            return execOrPromise(win, fail, "makeReadOnly", [options]);
+        }
         return execOrPromise(win, fail, "makeReadOnly", []);
     },
 
@@ -619,8 +636,36 @@ var nfc = {
         return execOrPromise(win, fail, "stopHandover", []);
     },
 
-    erase: function (win, fail) {
+    erase: function (win, fail, options) {
+        if (cordova.platformId === "ios") {
+            return execOrPromise(win, fail, "eraseTag", [options]);
+        }
         return execOrPromise(win, fail, "eraseTag", [[]]);
+    },
+
+    // Feature detection (added v1.9.0, PLU-258). Android implements erase, makeReadOnly and the
+    // NTAG password helpers (ntagAuthenticate/ntagSetPassword/ntagRemovePassword) natively, so
+    // those report true unconditionally there. iOS reports its own support (erase/makeReadOnly
+    // need iOS 13+); ntagPassword is hardcoded false on iOS - the NFCMiFareTag raw-command path
+    // used for NTAG password commands (PLU-255) is unverified against real NTAG213/215 hardware.
+    capabilities: function (win, fail) {
+        if (cordova.platformId === "android") {
+            return resolveOrCall(win, fail, {
+                erase: true,
+                makeReadOnly: true,
+                ntagPassword: true,
+                platform: "android"
+            });
+        }
+        if (cordova.platformId === "ios") {
+            return execOrPromise(win, fail, "capabilities", []);
+        }
+        return resolveOrCall(win, fail, {
+            erase: false,
+            makeReadOnly: false,
+            ntagPassword: false,
+            platform: cordova.platformId
+        });
     },
 
     enabled: function (win, fail) {

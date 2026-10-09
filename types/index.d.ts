@@ -275,6 +275,28 @@ export interface IWriteOptions {
     [key: string]: unknown;
 }
 
+/** Options for erase() / makeReadOnly() on iOS (added v1.9.0, PLU-257) */
+export interface IEraseOptions {
+    [key: string]: unknown;
+}
+
+/** Result of nfc.capabilities() (added v1.9.0, PLU-258) */
+export interface INfcCapabilities {
+    /** nfc.erase() is implemented on this platform */
+    erase: boolean;
+    /** nfc.makeReadOnly() is implemented on this platform */
+    makeReadOnly: boolean;
+    /**
+     * NTAG password set/remove is implemented on this platform. Always true on Android
+     * (ntagSetPassword/ntagRemovePassword). False on iOS by default (PLU-255): the
+     * NFCMiFareTag raw-command path transceive() uses for the password commands is
+     * unverified against real NTAG213/215 hardware.
+     */
+    ntagPassword: boolean;
+    /** cordova.platformId */
+    platform: string;
+}
+
 /** Callback-style success/failure pair */
 export type SuccessCallback<T = unknown> = (result?: T) => void;
 export type FailureCallback = (error: NfcFailure) => void;
@@ -325,13 +347,19 @@ export interface INfcPlugin {
     write(ndefMessage: INdefRecord[]): Promise<void>;
     write(ndefMessage: INdefRecord[], win?: SuccessCallback, fail?: FailureCallback, options?: IWriteOptions): void;
 
-    /** Make the last scanned tag read-only (permanent!) - Android */
+    /**
+     * Make the last scanned tag read-only (permanent!) - Android, and iOS 13+ after
+     * scanNdef/scanTag({keepSessionOpen: true}) (v1.9.0, PLU-257; options only used on iOS).
+     */
     makeReadOnly(): Promise<void>;
-    makeReadOnly(win?: SuccessCallback, fail?: FailureCallback): void;
+    makeReadOnly(win?: SuccessCallback, fail?: FailureCallback, options?: IEraseOptions): void;
 
-    /** Erase the last scanned tag (writes an empty NDEF record) - Android */
+    /**
+     * Erase the last scanned tag (writes an empty NDEF record) - Android, and iOS 13+ after
+     * scanNdef/scanTag({keepSessionOpen: true}) (v1.9.0, PLU-257; options only used on iOS).
+     */
     erase(): Promise<void>;
-    erase(win?: SuccessCallback, fail?: FailureCallback): void;
+    erase(win?: SuccessCallback, fail?: FailureCallback, options?: IEraseOptions): void;
 
     /** Android Beam was removed in Android 10: always fails with NOT_SUPPORTED */
     share(ndefMessage: INdefRecord[]): Promise<void>;
@@ -386,8 +414,25 @@ export interface INfcPlugin {
     /** Close the connect() session */
     close(): Promise<void>;
 
-    /** Send a raw command. Android: any connected tech; iOS: ISO 7816 APDUs after scanTag({keepSessionOpen:true}) */
+    /**
+     * Send a raw command. Android: any connected tech. iOS: after scanTag({keepSessionOpen: true}),
+     * ISO 7816 APDUs against an ISO7816 tag, or (v1.9.0, PLU-258) MIFARE commands against a tag
+     * that reports as MIFARE. As an experiment covering tags the reader session classifies some
+     * other way, it also tries the MIFARE path, unverified on real hardware, whenever the connected
+     * tag happens to conform to NFCMiFareTag. Unlike the ISO 7816 path, the MIFARE response does
+     * NOT have SW1/SW2 appended.
+     */
     transceive(command: ArrayBuffer | ArrayBufferView | number[] | string): Promise<ArrayBuffer>;
+
+    // ========== Feature detection ==========
+
+    /**
+     * Report which optional features this platform actually implements (added v1.9.0, PLU-258).
+     * Use this instead of `cordova.platformId` checks to decide whether to offer erase,
+     * makeReadOnly or NTAG password UI.
+     */
+    capabilities(): Promise<INfcCapabilities>;
+    capabilities(win?: SuccessCallback<INfcCapabilities>, fail?: FailureCallback): void;
 
     // ========== iOS error codes ==========
 
